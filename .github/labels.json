@@ -1,0 +1,27 @@
+[
+  { "name": "type: bug",        "color": "d73a4a", "description": "Something is broken" },
+  { "name": "type: feature",    "color": "0e8a16", "description": "New capability or enhancement" },
+  { "name": "type: chore",      "color": "c5def5", "description": "Maintenance, dependencies, tooling" },
+  { "name": "type: docs",       "color": "0075ca", "description": "READMEs, wiki, comments" },
+  { "name": "type: design",     "color": "cc317c", "description": "UI or design work" },
+  { "name": "type: deployment", "color": "e99695", "description": "A consumer deployment hit a problem deploying, upgrading or running" },
+  { "name": "type: security",   "color": "b60205", "description": "Security-relevant; coordinate per SECURITY.md before discussing publicly" },
+  { "name": "type: question",   "color": "d876e3", "description": "A how-do-I or a topic to talk through" },
+
+  { "name": "area: web",     "color": "1d76db", "description": "Angular web app (frontend/)" },
+  { "name": "area: desktop", "color": "1d76db", "description": "Electron desktop client (desktop/)" },
+  { "name": "area: api",     "color": "1d76db", "description": "Vending and admin API Lambdas (packages/infra-client/lambdacode)" },
+  { "name": "area: infra",   "color": "1d76db", "description": "CDK stacks and constructs (packages/infra-client/lib)" },
+  { "name": "area: vpn",     "color": "1d76db", "description": "Private network: NetworkStack, ConnectorStack, Headscale, resolver" },
+  { "name": "area: auth",    "color": "1d76db", "description": "Cognito, sign-in, passkeys, service users" },
+  { "name": "area: release", "color": "1d76db", "description": "Packaging, versioning, GitHub workflows" },
+
+  { "name": "priority: p0", "color": "b60205", "description": "Production broken, or data/trust at risk; drop everything" },
+  { "name": "priority: p1", "color": "d93f0b", "description": "Next up; blocks a release or a consumer deployment" },
+  { "name": "priority: p2", "color": "fbca04", "description": "Planned; normal queue" },
+  { "name": "priority: p3", "color": "fef2c0", "description": "Nice to have; when convenient" },
+
+  { "name": "status: needs-triage", "color": "ededed", "description": "New; not yet assessed (set automatically by the issue forms)" },
+  { "name": "status: needs-info",   "color": "ededed", "description": "Waiting on the reporter" },
+  { "name": "status: blocked",      "color": "ededed", "description": "Waiting on something outside this repo" }
+]

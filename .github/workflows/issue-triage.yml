@@ -1,0 +1,48 @@
+# Adds the matching "area: *" label from the Component / Surface / Stack
+# dropdown of the issue forms. Only ever adds labels.
+name: Issue triage
+
+on:
+  issues:
+    types: [opened, edited]
+
+permissions:
+  issues: write
+
+jobs:
+  area-label:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const AREA = {
+              'web app': 'area: web',
+              'desktop app': 'area: desktop',
+              'storybook': 'area: web',
+              'api': 'area: api',
+              'cdk stacks': 'area: infra',
+              'private network (vpn)': 'area: vpn',
+              'auth / sign-in': 'area: auth',
+              'release / ci': 'area: release',
+              'datastack': 'area: infra',
+              'credsstack': 'area: infra',
+              'webstack': 'area: infra',
+              'webcertstack': 'area: infra',
+              'targetaccountstack (workload account)': 'area: infra',
+              'networkstack': 'area: vpn',
+              'connectorstack': 'area: vpn',
+            };
+            const body = context.payload.issue.body ?? '';
+            const labels = new Set();
+            for (const m of body.matchAll(/^### (Component|Surface|Stack)\s*\n+([^\n]+)/gm)) {
+              const label = AREA[m[2].trim().toLowerCase()];
+              if (label) labels.add(label);
+            }
+            if (!labels.size) return core.info('no area to add');
+            await github.rest.issues.addLabels({
+              ...context.repo,
+              issue_number: context.payload.issue.number,
+              labels: [...labels],
+            });
+            core.info(`added ${[...labels].join(', ')}`);

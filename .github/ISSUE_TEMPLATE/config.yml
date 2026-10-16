@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/FNTIO/aws-infrastructure-client/security/advisories/new
+    about: Report it privately through GitHub; never in an issue, discussion or pull request.
+  - name: Question or discussion
+    url: https://github.com/FNTIO/aws-infrastructure-client/discussions/new?category=q-a
+    about: How-do-I questions, and anything to talk through before it becomes a bug or feature.
+  - name: Documentation
+    url: https://github.com/FNTIO/aws-infrastructure-client/wiki
+    about: Getting started, configuration reference, runbooks, troubleshooting.

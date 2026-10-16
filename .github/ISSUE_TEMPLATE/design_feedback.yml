@@ -1,0 +1,61 @@
+name: Design / UI feedback
+description: Something looks or behaves differently from the design, or a screen needs design attention
+labels: ["type: design", "status: needs-triage"]
+body:
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      options:
+        - Web app
+        - Desktop app
+        - Storybook
+    validations:
+      required: true
+  - type: input
+    id: where
+    attributes:
+      label: Page or component
+      description: The route, page name, or component file.
+      placeholder: "/users, or users-page.component.ts"
+    validations:
+      required: true
+  - type: input
+    id: story
+    attributes:
+      label: Storybook story
+      description: The story that shows it, if one exists.
+      placeholder: "Pages/Users"
+  - type: dropdown
+    id: theme
+    attributes:
+      label: Theme
+      multiple: true
+      options:
+        - Light
+        - Dark
+        - Custom branding (theme wizard)
+  - type: textarea
+    id: shipped
+    attributes:
+      label: What is shipped
+      description: What the screen looks or behaves like now. Drag screenshots in.
+    validations:
+      required: true
+  - type: textarea
+    id: intended
+    attributes:
+      label: What is intended
+      description: The design it should match, or the change you propose. Link the design file or Storybook story where possible.
+    validations:
+      required: true
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - Visual only (spacing, color, type)
+        - Interaction (placement, states, flow)
+        - Both
+    validations:
+      required: true

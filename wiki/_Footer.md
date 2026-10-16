@@ -1,0 +1,1 @@
+Source: [wiki/](https://github.com/FNTIO/aws-infrastructure-client/tree/main/wiki) in FNTIO/aws-infrastructure-client, mirrored by the Wiki workflow. Edit the files there; changes made on this site are overwritten by the next sync.

@@ -1,0 +1,16 @@
+# Read by the secret-scan workflow. Only invented secrets in fixtures and tests, and CloudFormation
+# logical ids, are allowlisted; add an entry here only after reading the finding.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Invented secrets in fixtures and tests, a curl template string, CloudFormation logical ids"
+paths = [
+  '''frontend/src/app/features/accounts/credentials-dialog\.fixture\.ts''',
+  '''packages/infra-client/lambdacode/headscale-apikey/__tests__/handler\.test\.ts''',
+]
+regexes = [
+  '''\$\{this\.created\(\)''',
+  # A logical id such as CredsApiANYCF915D75: letters then exactly eight hex digits, nothing else.
+  '''^[A-Za-z]+[0-9A-F]{8}$''',
+]

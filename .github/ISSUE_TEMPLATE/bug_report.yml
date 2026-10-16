@@ -1,0 +1,82 @@
+name: Bug report
+description: Something in the web app, desktop app, API, or stacks does not behave as documented
+labels: ["type: bug", "status: needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check the [Troubleshooting](https://github.com/FNTIO/aws-infrastructure-client/wiki/Troubleshooting) page first; several known symptoms have a one-line fix.
+        If your own deployment fails to deploy or upgrade, use the **Deployment / setup problem** form instead.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Web app
+        - Desktop app
+        - API
+        - CDK stacks
+        - Private network (VPN)
+        - Auth / sign-in
+        - Release / CI
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Package version from your deployment's package.json, and the desktop app version if the desktop app is involved.
+      placeholder: "package 0.1.10, desktop 0.1.2"
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you saw, including the exact error text if there was one.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      description: For web and desktop issues.
+      multiple: true
+      options:
+        - macOS
+        - Windows
+        - Linux
+        - Chrome / Edge
+        - Firefox
+        - Safari
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and errors
+      description: Browser console, desktop app log, CloudWatch log lines, or CDK output. Remove secrets, tokens, and credentials before pasting.
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues for this problem
+        - label: This report contains no secrets, tokens, or credentials
+          required: true

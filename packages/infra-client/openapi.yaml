@@ -1,0 +1,4223 @@
+# The HTTP contract of the portal API — every route the Express app mounts.
+# lambdacode/api/__tests__/openapi.test.ts fails when a mounted route is
+# missing here (or a documented one is gone), so this file cannot go stale.
+# The private dev repo generates its Postman collection FROM this file.
+openapi: 3.1.0
+info:
+  title: Infra Client API
+  version: 0.4.0
+  summary: Self-hosted AWS access portal — credential vending, access requests, admin catalog, private-network resources.
+  description: |
+    One Express app behind CloudFront (`/api/*`) and API Gateway (no prefix).
+
+    ## Authentication
+
+    Every route except `GET /health` and `GET /.well-known/infra-client` takes
+    `Authorization: Bearer <token>`, where the token is one of:
+
+    - **Human** — a Cognito **ID token** from the portal's user pool (in-app sign-in).
+      Admin routes additionally require membership of the `admins` group
+      (`cognito:groups` claim).
+    - **Service user** — a Cognito **access token** minted with the
+      `client_credentials` grant by an app client an admin created under
+      *Admin → Service users*. It carries the `api/invoke` scope; its `sub` is
+      the client id. **Every service user is an app admin**, so it may call
+      every route below — including `POST /credentials` to vend AWS credentials
+      for the roles granted to it.
+
+    Token exchange for service users (see the Access Model wiki page, "Service users"):
+
+        POST https://<cognito domain>/oauth2/token
+        Authorization: Basic base64(clientId:clientSecret)
+        Content-Type: application/x-www-form-urlencoded
+
+        grant_type=client_credentials&scope=api/invoke
+
+    ## Conventions
+
+    - Errors are always JSON `{ "message": "…" }`. `401` = no/invalid token,
+      `403` = not an admin (or no grant on a vend), `404` = addressed thing
+      missing, `409` = already exists / still in use / already decided,
+      `400` = malformed input, `501` = feature not deployed (private network,
+      branding storage), `502` = a downstream AWS call failed.
+    - Timestamps are ISO-8601 strings in UTC.
+    - `accountNumber` is always the 12-digit AWS account id.
+    - `userId` is the Cognito `sub` for humans and the app client id for
+      service users — both are valid grant principals everywhere a `userId`
+      path parameter appears.
+    - Lists are returned whole; there is no server-side paging.
+    - Temporary access uses the duration presets `1, 12, 24, 72, 168, 720`
+      hours (1 h … 30 d). Omitting the duration means long-term (standing) access.
+  license:
+    name: Elastic License 2.0
+    identifier: Elastic-2.0
+servers:
+  - url: https://{host}/api
+    description: Through the portal's CloudFront distribution (the web domain in your project config).
+    variables:
+      host:
+        default: portal.example.com
+        description: Your deployment's web domain.
+security:
+  - bearerAuth: []
+tags:
+  - name: Health
+    description: Liveness and the public discovery document.
+  - name: Access
+    description: What the caller may assume, and vending credentials or a console sign-in for it.
+  - name: Requests
+    description: The caller's own access requests (raising, listing, acknowledging decisions).
+  - name: Preferences
+    description: The caller's per-role and network preferences.
+  - name: Network
+    description: Private-network (VPN) sites and device enrollment.
+  - name: Resources
+    description: Private-network resources the caller can reach.
+  - name: Notifications
+    description: The caller's revoked-access notices (the bell).
+  - name: "Admin: setup"
+    description: First-run checklist state and branding.
+  - name: "Admin: accounts & roles"
+    description: The catalog of AWS accounts and the roles registered in them.
+  - name: "Admin: grants"
+    description: Who holds which role, directly or via groups.
+  - name: "Admin: users"
+    description: The Cognito directory and per-user cascades.
+  - name: "Admin: service users"
+    description: Machine-to-machine app clients (client_credentials).
+  - name: "Admin: groups"
+    description: Role/resource bundles whose members inherit the bundle.
+  - name: "Admin: requests"
+    description: The approval queue and history.
+  - name: "Admin: resources"
+    description: Private-network resource catalog and resource grants.
+  - name: "Admin: network"
+    description: Site topology and the grants→ACL reconciler.
+  - name: "Admin: audit"
+    description: The vend / console / device-key event log.
+  - name: Plugins
+    description: What the signed-in caller may open, for the portal's own navigation.
+  - name: "Admin: plugins"
+    description: Every installed plugin definition, and who may use each binding.
+
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: Liveness
+      operationId: health
+      security: []
+      responses:
+        "200":
+          description: The API is up.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, const: true }
+                required: [ok]
+
+  /.well-known/infra-client:
+    get:
+      tags: [Health]
+      summary: Discovery document (public)
+      operationId: discovery
+      description: |
+        What the desktop app reads to self-configure from a deployment URL:
+        the project name, the Cognito pool/client ids the SPA already ships
+        with, the OIDC issuer, and the VPN control planes. Never secrets.
+      security: []
+      responses:
+        "200":
+          description: Discovery document.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Discovery" }
+
+  /accounts:
+    get:
+      tags: [Access]
+      summary: List my access
+      operationId: listAccess
+      description: |
+        Accounts and roles the caller may assume right now (direct and group-provided grants, expired ones excluded), each with its resolved `~/.aws` profile name.
+        With `limit`, one page of the list contract: sorts `position` (the admin order, default), `name`, `number`; facets `environment`, `main` (`true`/`false` — whether the account sits in the dashboard's Main section), `favorite` (`true`/`false` — the caller's own favorites), plus `tenant`, `project`, `stage` on a deployment with account dimensions (`unclassified` for an account without one).
+        Each account carries `main: false` only when an admin took it off the Main section.
+      parameters:
+        - $ref: "#/components/parameters/listQ"
+        - $ref: "#/components/parameters/listFilter"
+        - $ref: "#/components/parameters/listSort"
+        - $ref: "#/components/parameters/listLimit"
+        - $ref: "#/components/parameters/listCursor"
+      responses:
+        "200":
+          description: The caller's accounts — the whole list, or one page when `limit` was passed.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    properties:
+                      accounts:
+                        type: array
+                        items: { $ref: "#/components/schemas/AccountAccess" }
+                    required: [accounts]
+                  - $ref: "#/components/schemas/AccountAccessPage"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /accounts/home:
+    get:
+      tags: [Access]
+      summary: My dashboard
+      operationId: homeAccess
+      description: |
+        The caller's access cut into the dashboard's shortcuts. `sectioned` is true once the caller holds an account
+        that is not main (or whenever `layout` is `sections`); until then `main` is the whole list and the dashboard
+        shows no sections. A caller who holds nothing is never sectioned, whatever the layout. Accounts the caller
+        holds nothing in are not listed: asking for one is `GET /requests/catalog`'s job.
+      responses:
+        "200":
+          description: The dashboard.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sectioned: { type: boolean }
+                  heldTotal: { type: integer, minimum: 0 }
+                  main: { type: array, items: { $ref: "#/components/schemas/AccountAccess" } }
+                  favorites: { type: array, items: { $ref: "#/components/schemas/AccountAccess" } }
+                  recent: { type: array, items: { $ref: "#/components/schemas/AccountAccess" }, description: Newest first. }
+                  favoriteNumbers: { type: array, items: { $ref: "#/components/schemas/AccountNumber" } }
+                  layout: { type: string, enum: [auto, sections, plain], description: The deployment-wide setting behind `sectioned` (`PUT /admin/dashboard-layout`). }
+                required: [sectioned, heldTotal, main, favorites, recent, favoriteNumbers, layout]
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /accounts/names:
+    get:
+      tags: [Access]
+      summary: Friendly names of every registered account
+      operationId: listAccountNames
+      description: |
+        Account number → admin-set name, for every registered account that has one — the label lookup the web app
+        binds on chips and rows. Catalog facts only, never roles or holders; a few dozen KB where the full catalog is
+        megabytes. Every signed-in user may read it (the request catalog already shows every account).
+      responses:
+        "200":
+          description: The name map.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  names:
+                    type: object
+                    additionalProperties: { type: string }
+                required: [names]
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/Upstream" }
+  /accounts/expiry:
+    get:
+      tags: [Access]
+      summary: My expiry notices
+      operationId: listExpiryNotices
+      description: The caller's temporary role grants nearing (`expiring`) or past (`expired`) their end — the bell feed.
+      responses:
+        "200":
+          description: Expiry notices by phase.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExpiryNotices" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /accounts/expiry/seen:
+    post:
+      tags: [Access]
+      summary: Acknowledge expiry notices
+      operationId: markExpiryNoticesSeen
+      responses:
+        "200":
+          description: How many notices were newly marked seen.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Cleared" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /accounts/{accountNumber}/roles/{roleName}/console:
+    post:
+      tags: [Access]
+      summary: Console sign-in URL
+      operationId: consoleSignIn
+      description: |
+        "Go to Console": same grant check as `POST /credentials`, returns a
+        short-lived AWS console federation URL. Every call — vended, denied or
+        failed — writes an audit event.
+      parameters:
+        - $ref: "#/components/parameters/accountNumber"
+        - $ref: "#/components/parameters/roleName"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                destination:
+                  type: string
+                  format: uri
+                  description: Optional post-login destination; must be an `https://…console.aws.amazon.com/` URL.
+            example: { destination: "https://eu-central-1.console.aws.amazon.com/s3/home" }
+      responses:
+        "200":
+          description: The sign-in URL.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConsoleSignIn" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: No active grant for this role (`NO_GRANT` or `EXPIRED`), or the role is no longer in the catalog (`NO_ROLE`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /credentials:
+    post:
+      tags: [Access]
+      summary: Vend credentials
+      operationId: vendCredentials
+      description: |
+        Temporary AWS credentials for a role the caller holds. The session
+        length is the role's `sessionDurationSeconds` (default 3600), capped
+        by the IAM role's MaxSessionDuration — a cap violation is a `502`
+        whose message says so. Every call writes an audit event.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                accountNumber: { $ref: "#/components/schemas/AccountNumber" }
+                role:
+                  type: string
+                  maxLength: 128
+                  description: The role name (not the ARN). May not contain `#` or `/`.
+                background:
+                  type: boolean
+                  description: "true = an automatic renewal (desktop keep-fresh), which does not count as the person reaching for the account: it leaves the dashboard's Recent section alone."
+              required: [accountNumber, role]
+            example: { accountNumber: "123456789012", role: "ReadOnly" }
+      responses:
+        "200":
+          description: Credentials.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VendedCredentials" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: No active grant for this role (`NO_GRANT` or `EXPIRED`), or the role is no longer in the catalog (`NO_ROLE`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /requests/catalog:
+    get:
+      tags: [Requests]
+      summary: Requestable roles
+      operationId: listRequestableRoles
+      description: |
+        The role catalog minus what the caller already holds long-term or has pending. Account numbers and role names only — never ARNs or holders.
+        With `limit`, one page of the list contract: sorts `name` (default), `number`; facets `tenant`, `project`, `stage` on a deployment with account dimensions (`unclassified` for an account without one), none otherwise.
+      parameters:
+        - $ref: "#/components/parameters/listQ"
+        - $ref: "#/components/parameters/listFilter"
+        - $ref: "#/components/parameters/listSort"
+        - $ref: "#/components/parameters/listLimit"
+        - $ref: "#/components/parameters/listCursor"
+      responses:
+        "200":
+          description: Accounts with requestable roles — the whole list, or one page when `limit` was passed.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    properties:
+                      accounts:
+                        type: array
+                        items: { $ref: "#/components/schemas/RequestableAccount" }
+                    required: [accounts]
+                  - $ref: "#/components/schemas/RequestableAccountPage"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /requests/resource-catalog:
+    get:
+      tags: [Requests]
+      summary: Requestable resources
+      operationId: listRequestableResources
+      description: Private-network resources the caller may ask for — name, type, description and account only; connection details appear only after a grant (`GET /resources`).
+      responses:
+        "200":
+          description: Requestable resources.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  resources:
+                    type: array
+                    items: { $ref: "#/components/schemas/RequestableResource" }
+                required: [resources]
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /requests:
+    get:
+      tags: [Requests]
+      summary: My requests
+      operationId: listMyRequests
+      description: The caller's own requests, newest first. Resource rows carry a resolved `resourceName`.
+      responses:
+        "200":
+          description: The caller's requests.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  requests:
+                    type: array
+                    items: { $ref: "#/components/schemas/AccessRequest" }
+                required: [requests]
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/Upstream" }
+    post:
+      tags: [Requests]
+      summary: Request a role
+      operationId: createRequest
+      description: Ask for a role. The requester is always the caller. `409` if the caller already holds it long-term or has one pending; `404` if the role is not catalogued.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                accountNumber: { $ref: "#/components/schemas/AccountNumber" }
+                roleName: { type: string }
+                reason: { type: string, maxLength: 500 }
+                durationHours: { $ref: "#/components/schemas/DurationHours" }
+              required: [accountNumber, roleName]
+            example: { accountNumber: "123456789012", roleName: "ReadOnly", reason: "Investigating an incident", durationHours: 24 }
+      responses:
+        "201":
+          description: The pending request.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RequestEnvelope" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /requests/resource:
+    post:
+      tags: [Requests]
+      summary: Request a resource
+      operationId: createResourceRequest
+      description: Ask for private-network access to one resource. Same rules as requesting a role.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                resourceId: { type: string }
+                reason: { type: string, maxLength: 500 }
+                durationHours: { $ref: "#/components/schemas/DurationHours" }
+              required: [resourceId]
+            example: { resourceId: "7f1c2b3a-0000-4000-8000-000000000000", reason: "Need the staging database", durationHours: 72 }
+      responses:
+        "201":
+          description: The pending request.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RequestEnvelope" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /requests/seen:
+    post:
+      tags: [Requests]
+      summary: Acknowledge decisions
+      operationId: markRequestsSeen
+      description: Marks the caller's decided requests as seen (clears the bell badge).
+      responses:
+        "200":
+          description: How many requests were newly marked seen.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Cleared" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /preferences:
+    get:
+      tags: [Preferences]
+      summary: List my role preferences
+      operationId: listPreferences
+      description: Every (account, role) the caller has customised — profile-name override, role label, auto-vend star.
+      responses:
+        "200":
+          description: Preference rows.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  preferences:
+                    type: array
+                    items: { $ref: "#/components/schemas/RolePreference" }
+                required: [preferences]
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /preferences/auto-vend/{accountNumber}/{role}:
+    put:
+      tags: [Preferences]
+      summary: Set the auto-vend star
+      operationId: setAutoVend
+      description: Starred roles are vended silently on app load (desktop keeps them fresh in `~/.aws/credentials`).
+      parameters:
+        - $ref: "#/components/parameters/accountNumber"
+        - $ref: "#/components/parameters/role"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                autoVend: { type: boolean }
+              required: [autoVend]
+            example: { autoVend: true }
+      responses:
+        "200":
+          description: The saved value.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  autoVend: { type: boolean }
+                required: [autoVend]
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /preferences/favorites/{accountNumber}:
+    put:
+      tags: [Preferences]
+      summary: Star or unstar an account
+      operationId: setFavorite
+      description: A starred account shows in the dashboard's Favorites section on every device. At most 50; starring a starred account changes nothing.
+      parameters:
+        - $ref: "#/components/parameters/accountNumber"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                favorite: { type: boolean }
+              required: [favorite]
+      responses:
+        "200":
+          description: The saved state.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  favorite: { type: boolean }
+                required: [favorite]
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /preferences/network:
+    get:
+      tags: [Preferences]
+      summary: Get my network preferences
+      operationId: getNetworkPrefs
+      description: Device-independent VPN preferences — the auto-reconnect toggle and the site a reconnect rejoins.
+      responses:
+        "200":
+          description: Network preferences.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NetworkPrefs" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/Upstream" }
+    put:
+      tags: [Preferences]
+      summary: Update my network preferences
+      operationId: setNetworkPrefs
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: At least one field.
+              properties:
+                autoReconnect: { type: boolean }
+                lastSiteId: { type: string, minLength: 1, maxLength: 64 }
+            example: { autoReconnect: true, lastSiteId: "dev" }
+      responses:
+        "200":
+          description: The preferences after the update.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NetworkPrefs" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /preferences/notifications:
+    get:
+      tags: [Preferences]
+      summary: Get my notification preferences
+      operationId: getNotificationPrefs
+      description: Which bell items may pop up as native notifications (desktop toasts, browser notifications). Everything is on until turned off; the row follows the user across devices.
+      responses:
+        "200":
+          description: Notification preferences.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NotificationPrefs" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/Upstream" }
+    put:
+      tags: [Preferences]
+      summary: Update my notification preferences
+      operationId: setNotificationPrefs
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: At least one field; `kinds` may be partial.
+              properties:
+                enabled: { type: boolean }
+                kinds:
+                  type: object
+                  additionalProperties: { type: boolean }
+            example: { enabled: true, kinds: { requests: false } }
+      responses:
+        "200":
+          description: The preferences after the update.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NotificationPrefs" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /preferences/profile-name/{accountNumber}/{role}:
+    get:
+      tags: [Preferences]
+      summary: Get my profile-name override
+      operationId: getProfileName
+      parameters:
+        - $ref: "#/components/parameters/accountNumber"
+        - $ref: "#/components/parameters/role"
+      responses:
+        "200":
+          description: The override, or `null` when the admin default applies.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProfileNameValue" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/Upstream" }
+    put:
+      tags: [Preferences]
+      summary: Set my profile-name override
+      operationId: setProfileName
+      description: A blank or absent `profileName` clears the override (same as DELETE).
+      parameters:
+        - $ref: "#/components/parameters/accountNumber"
+        - $ref: "#/components/parameters/role"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                profileName: { type: string, maxLength: 128 }
+            example: { profileName: "acme-prod-readonly" }
+      responses:
+        "200":
+          description: The saved value (`null` when cleared).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProfileNameValue" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/Upstream" }
+    delete:
+      tags: [Preferences]
+      summary: Clear my profile-name override
+      operationId: clearProfileName
+      parameters:
+        - $ref: "#/components/parameters/accountNumber"
+        - $ref: "#/components/parameters/role"
+      responses:
+        "204": { description: Cleared. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /preferences/role-label/{accountNumber}/{role}:
+    put:
+      tags: [Preferences]
+      summary: Set my role label
+      operationId: setRoleLabel
+      description: A personal display name for the role card. Blank or absent clears it (the admin display name shows again).
+      parameters:
+        - $ref: "#/components/parameters/accountNumber"
+        - $ref: "#/components/parameters/role"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                roleLabel: { type: string, maxLength: 64 }
+            example: { roleLabel: "Prod read-only" }
+      responses:
+        "200":
+          description: The saved value (`null` when cleared).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  roleLabel: { type: [string, "null"] }
+                required: [roleLabel]
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/Upstream" }
+    delete:
+      tags: [Preferences]
+      summary: Clear my role label
+      operationId: clearRoleLabel
+      parameters:
+        - $ref: "#/components/parameters/accountNumber"
+        - $ref: "#/components/parameters/role"
+      responses:
+        "204": { description: Cleared. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /network:
+    get:
+      tags: [Network]
+      summary: Network sites
+      operationId: listNetworkSites
+      description: Whether private-network access is deployed, and the sites a device may enrol in. Split-DNS and VPC detail are admin-only (`GET /admin/network`).
+      responses:
+        "200":
+          description: Site list.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  enabled: { type: boolean }
+                  controlUrl:
+                    type: [string, "null"]
+                    description: Legacy single-site field — always the first site's control URL.
+                  sites:
+                    type: array
+                    items: { $ref: "#/components/schemas/PublicSite" }
+                required: [enabled, controlUrl, sites]
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /network/device-key:
+    post:
+      tags: [Network]
+      summary: Mint a device enrollment key
+      operationId: mintDeviceKey
+      description: |
+        A single-use, 30-minute enrollment key for ONE site, bound to the
+        caller's identity (their `sub` becomes the device's network user).
+        Reachability is enforced by the grants→ACL reconciler, not here.
+        Every mint writes an audit event (`NETWORK_KEY`).
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                siteId:
+                  type: string
+                  description: Defaults to the first site.
+            example: { siteId: "dev" }
+      responses:
+        "200":
+          description: The key and where to use it.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeviceKey" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "501": { $ref: "#/components/responses/NotDeployed" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /network/shares:
+    get:
+      tags: [Network]
+      summary: My dev shares and what teammates share with me
+      operationId: listDevShares
+      description: |
+        Dev shares: a user exposes ONE local port on their laptop to named users/groups on the same
+        site for a bounded time. `mine` = shares the caller owns (with grantees); `sharedWithMe` = live
+        shares the caller holds directly or through a group. Expired shares are never returned.
+        Reachability is enforced by the ACL reconciler from the OWNER'S enrolled device IPs. Answers
+        while the network exists even if `devShares` was later disabled (leftover shares stay visible).
+      responses:
+        "200":
+          description: Both lists, soonest expiry first.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mine: { type: array, items: { $ref: "#/components/schemas/DevShare" } }
+                  sharedWithMe: { type: array, items: { $ref: "#/components/schemas/DevShareWithMe" } }
+                required: [mine, sharedWithMe]
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "501": { $ref: "#/components/responses/NotDeployed" }
+        "502": { $ref: "#/components/responses/Upstream" }
+    post:
+      tags: [Network]
+      summary: Start a dev share
+      operationId: createDevShare
+      description: |
+        Writes a `share#<id>` grant per grantee (users and, when `allowGroupTargets`, groups) plus the
+        share's definition, then kicks the ACL reconciler so the rule lands within seconds. `hostname`/`ip`
+        are the desktop app's own tailnet address — display-only, so grantees get a URL; the rule itself
+        targets the owner's enrolled device IPs. `hostname` must be the owner's node name on the share's
+        site (`<name>.<siteId>.tail.internal`). Duration is capped by `network.devShares.maxDurationHours`.
+        At most 10 live shares per owner, one per port. 501 while `devShares` is disabled.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                port: { type: integer, minimum: 1, maximum: 65535 }
+                label: { type: string, maxLength: 60, description: "Defaults to \"Port <port>\"." }
+                siteId: { type: string, description: Defaults to the first site. }
+                durationHours: { type: integer, minimum: 1 }
+                hostname: { type: string, description: The owner's MagicDNS name. }
+                ip: { type: string, description: The owner's tailnet IPv4 (100.64.0.0/10). }
+                grantees:
+                  type: array
+                  minItems: 1
+                  maxItems: 50
+                  items:
+                    type: object
+                    properties:
+                      kind: { type: string, enum: [user, group] }
+                      id: { type: string }
+                    required: [kind, id]
+              required: [port, durationHours, grantees]
+            example:
+              port: 4200
+              label: Checkout redesign
+              siteId: dev
+              durationHours: 8
+              hostname: devs-macbook.dev.tail.internal
+              grantees: [{ kind: user, id: 8d2c…-sub }, { kind: group, id: 1f4a…-group }]
+      responses:
+        "201":
+          description: The new share as its owner sees it.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  share: { $ref: "#/components/schemas/DevShare" }
+                required: [share]
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "501": { $ref: "#/components/responses/NotDeployed" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /network/shares/directory:
+    get:
+      tags: [Network]
+      summary: Who a dev share can target
+      operationId: listDevShareDirectory
+      description: |
+        The one directory read open to non-admins, and deliberately thin: every user's sub + email
+        (invited-but-unconfirmed users omitted) and every group's id, name and member count. 501 while
+        `devShares` is disabled.
+      responses:
+        "200":
+          description: Users and groups, sorted by email / name.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DevShareDirectory" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "501": { $ref: "#/components/responses/NotDeployed" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /network/shares/{shareId}:
+    delete:
+      tags: [Network]
+      summary: Stop a dev share
+      operationId: deleteDevShare
+      description: |
+        Owner or admin. Every grant row and the definition go; grantees who lose access get a revocation
+        notice of kind `SHARE` (via `OWNER`, or `ADMIN` when an admin stopped it). Kicks the reconciler.
+        Works while the network exists even if `devShares` was later disabled.
+      parameters:
+        - name: shareId
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[a-f0-9]{12}$" }
+      responses:
+        "204": { description: Stopped. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "501": { $ref: "#/components/responses/NotDeployed" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /resources:
+    get:
+      tags: [Resources]
+      summary: My reachable resources
+      operationId: listReachableResources
+      description: Private-network resources the caller holds an active grant on — the only place connection details (`cidr`, `ports`, `dnsName`) are exposed to non-admins.
+      responses:
+        "200":
+          description: Reachable resources, sorted by name.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  resources:
+                    type: array
+                    items: { $ref: "#/components/schemas/ReachableResource" }
+                required: [resources]
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /resources/expiry:
+    get:
+      tags: [Resources]
+      summary: My resource expiry notices
+      operationId: listResourceExpiryNotices
+      responses:
+        "200":
+          description: Temporary resource grants nearing / past their end.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  expiring:
+                    type: array
+                    items: { $ref: "#/components/schemas/ResourceExpiryNotice" }
+                  expired:
+                    type: array
+                    items: { $ref: "#/components/schemas/ResourceExpiryNotice" }
+                required: [expiring, expired]
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /resources/expiry/seen:
+    post:
+      tags: [Resources]
+      summary: Acknowledge resource expiry notices
+      operationId: markResourceExpiryNoticesSeen
+      responses:
+        "200":
+          description: How many notices were newly marked seen.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Cleared" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /notifications/revocations:
+    get:
+      tags: [Notifications]
+      summary: My revocation notices
+      operationId: listRevocationNotices
+      description: Access the caller lost (admin revoke, group change, reapproval, cascade), newest first. Kept 30 days.
+      responses:
+        "200":
+          description: Revocation notices.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  notices:
+                    type: array
+                    items: { $ref: "#/components/schemas/RevocationNotice" }
+                required: [notices]
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /notifications/revocations/seen:
+    post:
+      tags: [Notifications]
+      summary: Acknowledge revocation notices
+      operationId: markRevocationNoticesSeen
+      responses:
+        "200":
+          description: How many notices were newly marked seen.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Cleared" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  # ---------------------------------------------------------------- admin ---
+
+  /admin/setup:
+    get:
+      tags: ["Admin: setup"]
+      summary: Setup checklist state
+      operationId: getSetupStatus
+      description: First-run checklist inputs, aggregated live — items check themselves off as the deployment fills in.
+      responses:
+        "200":
+          description: Setup status.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SetupStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/branding:
+    put:
+      tags: ["Admin: setup"]
+      summary: Save the branding overlay
+      operationId: saveBranding
+      description: Writes `/branding.json` in the web bucket (the SPA fetches it from the web origin at boot — there is no GET here). `dismissed` hides the first-admin theme wizard.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: At least one of `branding`, `dismissed`.
+              properties:
+                branding: { $ref: "#/components/schemas/BrandingOverlay" }
+                dismissed: { type: boolean }
+            example: { branding: { projectName: "Acme Access", primaryColor: "#3e63dd" }, dismissed: true }
+      responses:
+        "204": { description: Saved. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "501": { $ref: "#/components/responses/NotDeployed" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/accounts:
+    get:
+      tags: ["Admin: accounts & roles"]
+      summary: List the catalog
+      operationId: adminListAccounts
+      description: |
+        Every registered account with its roles; each role carries its unexpired-grantee count.
+        With `limit`, one page of the list contract: sorts `position` (the admin order, default), `name`, `number`; facets `environment`, `status`, `main` (`true`/`false`), plus `tenant`, `project`, `stage` on a deployment with account dimensions (`unclassified` for an account without one).
+      parameters:
+        - $ref: "#/components/parameters/listQ"
+        - $ref: "#/components/parameters/listFilter"
+        - $ref: "#/components/parameters/listSort"
+        - $ref: "#/components/parameters/listLimit"
+        - $ref: "#/components/parameters/listCursor"
+      responses:
+        "200":
+          description: The catalog — the whole list, or one page when `limit` was passed.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    properties:
+                      accounts:
+                        type: array
+                        items: { $ref: "#/components/schemas/AdminAccount" }
+                    required: [accounts]
+                  - $ref: "#/components/schemas/AdminAccountPage"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/Upstream" }
+    post:
+      tags: ["Admin: accounts & roles"]
+      summary: Register an account
+      operationId: adminCreateAccount
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AccountCreate" }
+            example: { accountNumber: "123456789012", name: "Production", environment: "prod", profileName: "acme-prod" }
+      responses:
+        "201":
+          description: The account.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AccountEnvelope" }
+        "200":
+          description: Already registered with the same values (a retry); the stored account, nothing changed. Different values are a `409`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AccountEnvelope" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/dashboard-layout:
+    get:
+      tags: ["Admin: accounts & roles"]
+      summary: The deployment-wide dashboard layout
+      operationId: adminGetDashboardLayout
+      description: |
+        How every user's dashboard is laid out. `auto` (the default): a user gets Main / Favorites / Recent and the
+        search once they hold an account an admin took off the Main section, and the plain list until then — so a
+        deployment that never touches the Main flag looks as it always did. `sections`: everyone gets the sections.
+        `plain`: nobody does. The per-account "Show in the Main section" flag still decides what sits in Main.
+      responses:
+        "200":
+          description: The current mode.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DashboardLayout" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/Upstream" }
+    put:
+      tags: ["Admin: accounts & roles"]
+      summary: Set the deployment-wide dashboard layout
+      operationId: adminSetDashboardLayout
+      description: Takes effect on each user's next dashboard load; a change is recorded in the activity log.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DashboardLayout" }
+      responses:
+        "200":
+          description: The stored mode.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DashboardLayout" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/Upstream" }
+  /admin/accounts/order:
+    put:
+      tags: ["Admin: accounts & roles"]
+      summary: Set the display order of the accounts
+      operationId: adminReorderAccounts
+      description: The whole list, first to last; each account's position becomes its index, and each listed role's its position inside its account. This is the order every page shows to every user (Your access and the admin tabs). Accounts left out, and roles left out of an account's list, lose any position they had and list after the ordered ones, by name.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AccountOrder" }
+            example: { accounts: [{ accountNumber: "111111111111", roles: ["DevRole", "AdminRole"] }, { accountNumber: "222222222222" }] }
+      responses:
+        "200":
+          description: The ordered accounts as stored, in the new order — only the ones the request listed, never the whole catalog.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accounts:
+                    type: array
+                    items: { $ref: "#/components/schemas/AdminAccount" }
+                required: [accounts]
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /admin/accounts/{accountNumber}:
+    get:
+      tags: ["Admin: accounts & roles"]
+      summary: Get one account
+      operationId: adminGetAccount
+      parameters:
+        - $ref: "#/components/parameters/accountNumber"
+      responses:
+        "200":
+          description: The account with its roles.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AccountEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/Upstream" }
+    patch:
+      tags: ["Admin: accounts & roles"]
+      summary: Update an account
+      operationId: adminUpdateAccount
+      description: At least one field. `profileName` is the `~/.aws` profile users get when they hold exactly one role here; `""` clears it; it must be unique across accounts and roles (`409`).
+      parameters:
+        - $ref: "#/components/parameters/accountNumber"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AccountPatch" }
+            example: { name: "Production (EU)", status: "active" }
+      responses:
+        "200":
+          description: The updated account.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AccountEnvelope" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "502": { $ref: "#/components/responses/Upstream" }
+    delete:
+      tags: ["Admin: accounts & roles"]
+      summary: Remove an account
+      operationId: adminDeleteAccount
+      description: "**Cascades**: for each of the account's roles, every grant is revoked (losses are noticed), group bundles drop it and its open requests are denied with the reason; then the roles and the account go. Refused with 409 while the account still has network resources — remove those first. Grants go before the catalog rows, so a call that failed halfway can be repeated."
+      parameters:
+        - $ref: "#/components/parameters/accountNumber"
+      responses:
+        "204": { description: Removed. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/accounts/{accountNumber}/roles:
+    post:
+      tags: ["Admin: accounts & roles"]
+      summary: Add a role
+      operationId: adminCreateRole
+      description: Registers a role users can be granted. Auto-registers the account if it is not catalogued yet. The ARN's account must equal the path's `accountNumber`.
+      parameters:
+        - $ref: "#/components/parameters/accountNumber"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RoleCreate" }
+            example: { roleName: "ReadOnly", displayName: "Read only", roleArn: "arn:aws:iam::123456789012:role/ReadOnly", policyTier: "READ_ONLY", sessionDurationSeconds: 3600, icon: "view" }
+      responses:
+        "201":
+          description: The role.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RoleEnvelope" }
+        "200":
+          description: Already registered with the same values (a retry); the stored role, nothing changed. Different values, or a name that differs only in case, are a `409`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RoleEnvelope" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/accounts/{accountNumber}/roles/{roleName}:
+    patch:
+      tags: ["Admin: accounts & roles"]
+      summary: Update a role
+      operationId: adminUpdateRole
+      description: At least one field. `sessionDurationSeconds` (900–43200) is what vends ask STS for; `profileName` must be unique across accounts and roles (`409`).
+      parameters:
+        - $ref: "#/components/parameters/accountNumber"
+        - $ref: "#/components/parameters/roleName"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RolePatch" }
+            example: { displayName: "Read only (EU)", sessionDurationSeconds: 7200, color: "#3e63dd" }
+      responses:
+        "200":
+          description: The updated role.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RoleEnvelope" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "502": { $ref: "#/components/responses/Upstream" }
+    delete:
+      tags: ["Admin: accounts & roles"]
+      summary: Remove a role
+      operationId: adminDeleteRole
+      description: "**Cascades**: every grant on the role is revoked (losses are noticed), groups bundling it drop it (a group left empty is removed), and its open requests and reviews are denied with the reason. Grants go before the catalog row, so a call that failed halfway can be repeated: an already-removed role still sweeps its leftovers before the 404."
+      parameters:
+        - $ref: "#/components/parameters/accountNumber"
+        - $ref: "#/components/parameters/roleName"
+      responses:
+        "204": { description: Removed. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/accounts/{accountNumber}/roles/{roleName}/test-session:
+    post:
+      tags: ["Admin: accounts & roles"]
+      summary: Test a session length
+      operationId: adminTestSession
+      description: "Tries `AssumeRoleWithWebIdentity` as the calling admin for `durationSeconds`, discarding the credentials. `ok: false` carries STS's message (usually the IAM role's MaxSessionDuration is lower)."
+      parameters:
+        - $ref: "#/components/parameters/accountNumber"
+        - $ref: "#/components/parameters/roleName"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                durationSeconds: { type: integer, minimum: 900, maximum: 43200 }
+              required: [durationSeconds]
+            example: { durationSeconds: 14400 }
+      responses:
+        "200":
+          description: The outcome.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TestSessionResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/accounts/{accountNumber}/roles/{roleName}/grants:
+    get:
+      tags: ["Admin: grants"]
+      summary: Who holds this role
+      operationId: adminListGrantees
+      parameters:
+        - $ref: "#/components/parameters/accountNumber"
+        - $ref: "#/components/parameters/roleName"
+      responses:
+        "200":
+          description: Holders, direct and via groups.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  grantees:
+                    type: array
+                    items: { $ref: "#/components/schemas/Grantee" }
+                required: [grantees]
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/accounts/{accountNumber}/roles/{roleName}/grants/{userId}:
+    put:
+      tags: ["Admin: grants"]
+      summary: Grant a role
+      operationId: adminAssignRole
+      description: Idempotent. `durationHours` makes the grant temporary; re-granting overwrites the expiry (the "extend" path). A long-term grant is never downgraded to temporary. `userId` may be a service user's client id.
+      parameters:
+        - $ref: "#/components/parameters/accountNumber"
+        - $ref: "#/components/parameters/roleName"
+        - $ref: "#/components/parameters/userId"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                durationHours: { $ref: "#/components/schemas/DurationHours" }
+            example: { durationHours: 24 }
+      responses:
+        "200":
+          description: The grant as stored.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  grant: { $ref: "#/components/schemas/Grant" }
+                required: [grant]
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/Upstream" }
+    delete:
+      tags: ["Admin: grants"]
+      summary: Revoke a role
+      operationId: adminRevokeRole
+      description: Removes the direct grant only — group-provided access stays (change the group instead). The loss is noticed if it ends the user's access.
+      parameters:
+        - $ref: "#/components/parameters/accountNumber"
+        - $ref: "#/components/parameters/roleName"
+        - $ref: "#/components/parameters/userId"
+      responses:
+        "204": { description: Revoked. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/grants/bulk:
+    post:
+      tags: ["Admin: grants"]
+      summary: Grant roles in bulk
+      operationId: adminBulkAssign
+      description: Up to 20 roles × 50 users in one call. Always `200` with a per-pair result — one bad pair never fails the rest.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userIds: { type: array, items: { type: string }, minItems: 1, maxItems: 50 }
+                roles: { type: array, items: { $ref: "#/components/schemas/RoleRef" }, minItems: 1, maxItems: 20 }
+                durationHours: { $ref: "#/components/schemas/DurationHours" }
+              required: [userIds, roles]
+            example: { userIds: ["1a2b3c4d-0000-4000-8000-000000000000"], roles: [{ accountNumber: "123456789012", roleName: "ReadOnly" }], durationHours: 168 }
+      responses:
+        "200":
+          description: Per-pair results.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items: { $ref: "#/components/schemas/BulkAssignResult" }
+                required: [results]
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/grants/bulk-revoke:
+    post:
+      tags: ["Admin: grants"]
+      summary: Revoke roles in bulk
+      operationId: adminBulkRevoke
+      description: Always `200` with per-pair results — pairs with no direct grant are `SKIPPED`; group-provided pairs `FAILED` (membership, not a direct revoke, removes those).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userIds: { type: array, items: { type: string }, minItems: 1, maxItems: 50 }
+                roles: { type: array, items: { $ref: "#/components/schemas/RoleRef" }, minItems: 1, maxItems: 20 }
+              required: [userIds, roles]
+            example: { userIds: ["1a2b3c4d-0000-4000-8000-000000000000"], roles: [{ accountNumber: "123456789012", roleName: "ReadOnly" }] }
+      responses:
+        "200":
+          description: Per-pair results.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items: { $ref: "#/components/schemas/BulkRevokeResult" }
+                required: [results]
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/users:
+    get:
+      tags: ["Admin: users"]
+      summary: List users
+      operationId: adminListUsers
+      description: |
+        The Cognito directory (source of truth — a user with no grants still appears) with each user's effective roles and resources.
+        With `limit`, one page of the list contract: sorts `email` (default), `lastSeen`; facets `admin` (`admin`/`member`), `status` (`invited`/`active`).
+      parameters:
+        - $ref: "#/components/parameters/listQ"
+        - $ref: "#/components/parameters/listFilter"
+        - $ref: "#/components/parameters/listSort"
+        - $ref: "#/components/parameters/listLimit"
+        - $ref: "#/components/parameters/listCursor"
+      responses:
+        "200":
+          description: Users — the whole list, or one page when `limit` was passed.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    properties:
+                      users:
+                        type: array
+                        items: { $ref: "#/components/schemas/User" }
+                    required: [users]
+                  - $ref: "#/components/schemas/UserPage"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/Upstream" }
+    post:
+      tags: ["Admin: users"]
+      summary: Invite a user
+      operationId: adminCreateUser
+      description: Creates the Cognito user and, unless `sendEmail` is `false`, **sends the invitation email**. The response carries the sign-up link either way — the same `/login#inv=…` link the email holds, valid 7 days; anyone holding it can set the password. `409` if the email is taken.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email: { type: string, format: email }
+                admin: { type: boolean, default: false, description: Also add to the `admins` group. }
+                sendEmail: { type: boolean, default: true, description: "`false`: Cognito emails nothing and the response carries `signupLink` for you to pass on." }
+              required: [email]
+            example: { email: "new.user@example.com", admin: false, sendEmail: true }
+      responses:
+        "201":
+          description: "The new user (`pendingInvite: true`), plus `signupLink` only when `sendEmail` was `false`."
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: { $ref: "#/components/schemas/User" }
+                  signupLink: { type: string, description: "Only when `sendEmail` was `false` — it carries the temporary password. Absolute when the deploy has a web domain, else path-only (`/login#inv=…`)." }
+                required: [user]
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/users/bulk:
+    post:
+      tags: ["Admin: users"]
+      summary: Invite users in bulk
+      operationId: adminBulkCreateUsers
+      description: Up to 50 emails. Always `200` with a per-row `CREATED`/`FAILED` result — one taken email never fails the rest. Each `CREATED` row sent a real invitation email, or — with `sendEmail` `false` — carries its `signupLink` instead.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                emails: { type: array, items: { type: string, format: email }, minItems: 1, maxItems: 50 }
+                admin: { type: boolean, default: false }
+                sendEmail: { type: boolean, default: true }
+              required: [emails]
+            example: { emails: ["a@example.com", "b@example.com"], admin: false }
+      responses:
+        "200":
+          description: Per-row results.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items: { $ref: "#/components/schemas/BulkCreateResult" }
+                required: [results]
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/users/bulk-delete:
+    post:
+      tags: ["Admin: users"]
+      summary: Delete users in bulk
+      operationId: adminBulkDeleteUsers
+      description: Up to 50 users, each with the full delete cascade. Always `200` with per-row results; the caller's own account is refused so a sweep can never lock everyone out.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userIds: { type: array, items: { type: string }, minItems: 1, maxItems: 50 }
+              required: [userIds]
+            example: { userIds: ["1a2b3c4d-0000-4000-8000-000000000000"] }
+      responses:
+        "200":
+          description: Per-row results.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items: { $ref: "#/components/schemas/BulkDeleteResult" }
+                required: [results]
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/users/{userId}:
+    get:
+      tags: ["Admin: users"]
+      summary: One user with all their access
+      operationId: adminGetUser
+      description: The listing caps each user's `roles` and `resources` at 50 entries (`roleCount` / `resourceCount` carry the totals); this returns every entry for one user.
+      parameters:
+        - $ref: "#/components/parameters/userId"
+      responses:
+        "200":
+          description: The user.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: { $ref: "#/components/schemas/User" }
+                required: [user]
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/Upstream" }
+    patch:
+      tags: ["Admin: users"]
+      summary: Update a user
+      operationId: adminUpdateUser
+      description: Change the email and/or `admins`-group membership. Removing the last admin is refused (`409`).
+      parameters:
+        - $ref: "#/components/parameters/userId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: At least one field.
+              properties:
+                email: { type: string, format: email }
+                admin: { type: boolean }
+            example: { admin: true }
+      responses:
+        "204": { description: Updated. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "502": { $ref: "#/components/responses/Upstream" }
+    delete:
+      tags: ["Admin: users"]
+      summary: Delete a user
+      operationId: adminDeleteUser
+      description: "**Cascades**: grants, group memberships, preferences and access requests go too."
+      parameters:
+        - $ref: "#/components/parameters/userId"
+      responses:
+        "204": { description: Deleted. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/users/{userId}/grants:
+    get:
+      tags: ["Admin: users"]
+      summary: A user's role grants
+      operationId: adminListUserGrants
+      description: Everything the user holds, direct and via groups (audit view). Works for service users too.
+      parameters:
+        - $ref: "#/components/parameters/userId"
+      responses:
+        "200":
+          description: Grants.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  grants:
+                    type: array
+                    items: { $ref: "#/components/schemas/UserGrant" }
+                required: [grants]
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/users/{userId}/resource-grants:
+    get:
+      tags: ["Admin: users"]
+      summary: A user's resource grants
+      operationId: adminListUserResourceGrants
+      parameters:
+        - $ref: "#/components/parameters/userId"
+      responses:
+        "200":
+          description: Resource grants with resolved names.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  grants:
+                    type: array
+                    items: { $ref: "#/components/schemas/UserResourceGrantNamed" }
+                required: [grants]
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/users/{userId}/revoke-all:
+    post:
+      tags: ["Admin: users"]
+      summary: Revoke everything
+      operationId: adminRevokeAll
+      description: Every direct role and resource grant AND every group membership of the user goes (preferences stay). Each real loss is noticed.
+      parameters:
+        - $ref: "#/components/parameters/userId"
+      responses:
+        "200":
+          description: How many rows were removed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  removed: { type: integer }
+                required: [removed]
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/users/{userId}/resend-invite:
+    post:
+      tags: ["Admin: users"]
+      summary: Resend the invitation
+      operationId: adminResendInvite
+      description: Re-sends the invitation email with a fresh temporary password. `409` if the user already completed setup.
+      parameters:
+        - $ref: "#/components/parameters/userId"
+      responses:
+        "204": { description: Sent. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/users/{userId}/signup-link:
+    post:
+      tags: ["Admin: users"]
+      summary: Mint a fresh sign-up link
+      operationId: adminMintSignupLink
+      description: A new temporary password for a user who has not set their own yet, returned as the `/login#inv=…` link (valid 7 days). It retires the previous temporary password — the emailed link and any copied one stop working. `409` once the user completed setup.
+      parameters:
+        - $ref: "#/components/parameters/userId"
+      responses:
+        "200":
+          description: The link.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  signupLink: { type: string }
+                required: [signupLink]
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/users/{userId}/reset-mfa:
+    post:
+      tags: ["Admin: users"]
+      summary: Reset MFA
+      operationId: adminResetMfa
+      description: Lost-authenticator recovery — TOTP off, the user signs in with password alone again and can re-enrol. No-op if never enrolled.
+      parameters:
+        - $ref: "#/components/parameters/userId"
+      responses:
+        "204": { description: Reset. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/service-users:
+    get:
+      tags: ["Admin: service users"]
+      summary: List service users
+      operationId: adminListServiceUsers
+      responses:
+        "200":
+          description: Service users with their role grants.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  serviceUsers:
+                    type: array
+                    items: { $ref: "#/components/schemas/ServiceUser" }
+                required: [serviceUsers]
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/Upstream" }
+    post:
+      tags: ["Admin: service users"]
+      summary: Create a service user
+      operationId: adminCreateServiceUser
+      description: Creates a `client_credentials` app client. The `201` body carries the `clientSecret` — **the only time it is ever returned**. Grant roles to it with the ordinary grant routes, using its `clientId` as the `userId`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, minLength: 1, maxLength: 64, description: Unique among live service users. }
+              required: [name]
+            example: { name: "provisioning-app" }
+      responses:
+        "201":
+          description: The service user and its secret.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ServiceUserWithSecret" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/service-users/{clientId}:
+    delete:
+      tags: ["Admin: service users"]
+      summary: Delete a service user
+      operationId: adminDeleteServiceUser
+      description: "**Cascades**: the app client(s), every grant, and the registry row. Issued tokens stay signature-valid up to an hour but are refused on the next request."
+      parameters:
+        - $ref: "#/components/parameters/clientId"
+      responses:
+        "204": { description: Deleted. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/service-users/{clientId}/rotate:
+    post:
+      tags: ["Admin: service users"]
+      summary: Rotate the secret
+      operationId: adminRotateServiceUser
+      description: Creates a replacement client + secret carrying the same grants; the previous secret keeps working until `DELETE …/previous`. `409` while a previous secret is still active. The returned `serviceUser.clientId` is the NEW id.
+      parameters:
+        - $ref: "#/components/parameters/clientId"
+      responses:
+        "200":
+          description: The replacement and its secret (returned once).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ServiceUserWithSecret" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/service-users/{clientId}/previous:
+    delete:
+      tags: ["Admin: service users"]
+      summary: Finish a rotation
+      operationId: adminRemovePreviousSecret
+      description: Retires the previous client (its grants and registry row go). `clientId` is the CURRENT client's id.
+      parameters:
+        - $ref: "#/components/parameters/clientId"
+      responses:
+        "204": { description: Retired. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/groups:
+    get:
+      tags: ["Admin: groups"]
+      summary: List groups
+      operationId: adminListGroups
+      description: Every bundle with its roles, resources (names resolved) and members (emails resolved).
+      responses:
+        "200":
+          description: Groups.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  groups:
+                    type: array
+                    items: { $ref: "#/components/schemas/GroupView" }
+                required: [groups]
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/Upstream" }
+    post:
+      tags: ["Admin: groups"]
+      summary: Create a group
+      operationId: adminCreateGroup
+      description: A bundle needs at least one role or resource. Names are unique (case-insensitive, `409`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/GroupInput" }
+            example: { name: "Platform team", description: "Read access everywhere", roles: [{ accountNumber: "123456789012", roleName: "ReadOnly" }], resources: [] }
+      responses:
+        "201":
+          description: The group (members and resources as raw ids).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GroupEnvelope" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/groups/{groupId}:
+    get:
+      tags: ["Admin: groups"]
+      summary: One group with its whole bundle
+      operationId: adminGetGroup
+      description: The list caps each group's `roles` at 50 (`roleCount` carries the total); this returns every role, member and resource of one group.
+      parameters:
+        - $ref: "#/components/parameters/groupId"
+      responses:
+        "200":
+          description: The group.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GroupEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/Upstream" }
+    patch:
+      tags: ["Admin: groups"]
+      summary: Update a group
+      operationId: adminUpdateGroup
+      description: At least one field. A `roles`/`resources` change reconciles every member — added targets are granted to all, removed ones revoked unless held directly or via another group (losses are noticed).
+      parameters:
+        - $ref: "#/components/parameters/groupId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/GroupInput" }
+            example: { roles: [{ accountNumber: "123456789012", roleName: "ReadOnly" }, { accountNumber: "123456789012", roleName: "PowerUser" }] }
+      responses:
+        "200":
+          description: The updated group.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GroupEnvelope" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "502": { $ref: "#/components/responses/Upstream" }
+    delete:
+      tags: ["Admin: groups"]
+      summary: Delete a group
+      operationId: adminDeleteGroup
+      description: Pulls the bundle from every member (direct and other-group access survives; losses are noticed).
+      parameters:
+        - $ref: "#/components/parameters/groupId"
+      responses:
+        "204": { description: Deleted. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/groups/{groupId}/roles:
+    get:
+      tags: ["Admin: groups"]
+      summary: The bundle's roles, paged
+      operationId: adminListGroupRoles
+      description: The list contract over one group's roles (`q` matches role name, display name, account name or number; sorts `account` (default), `role`). Without `limit`, the first 50.
+      parameters:
+        - $ref: "#/components/parameters/groupId"
+        - $ref: "#/components/parameters/listQ"
+        - $ref: "#/components/parameters/listSort"
+        - $ref: "#/components/parameters/listLimit"
+        - $ref: "#/components/parameters/listCursor"
+      responses:
+        "200":
+          description: One page of the bundle.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ListPage"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            accountNumber: { $ref: "#/components/schemas/AccountNumber" }
+                            accountName: { type: string }
+                            roleName: { type: string }
+                            displayName: { type: string }
+                          required: [accountNumber, roleName]
+                    required: [items]
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/Upstream" }
+    post:
+      tags: ["Admin: groups"]
+      summary: Add one role to a group
+      operationId: adminAddGroupRole
+      description: |
+        Adds a single catalogued role to the bundle — the call an account-registration pipeline makes per new account.
+        Idempotent and race-free: the row is written only if absent, so a retry or two concurrent adds leave one row,
+        and a role already in the bundle answers `200` with nothing changed, noticed or logged. Members who gain the
+        role are noticed, as with a `PATCH`. Prefer this over `PATCH` with the full role list for large groups.
+      parameters:
+        - $ref: "#/components/parameters/groupId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/GroupRoleRef" }
+            example: { accountNumber: "123456789012", roleName: "ReadOnly" }
+      responses:
+        "201":
+          description: The role was added.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GroupEnvelope" }
+        "200":
+          description: The role was already in the bundle; nothing changed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GroupEnvelope" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/groups/{groupId}/roles/bulk:
+    post:
+      tags: ["Admin: groups"]
+      summary: Add every matching account's role to a group
+      operationId: adminAddGroupRolesBulk
+      description: |
+        The group editor's "add by dimension": every registered account matching `filter` (dimension values, `unclassified` for
+        accounts without one; keys AND together, values OR) and `q` (account name or number) that has a role named `roleName`
+        goes into the bundle. Rows are written only if absent, roles already bundled are skipped, members who gain
+        access are noticed as with a single add. One call writes at most 500 new rows and reports `remaining`; call again
+        until it is 0. `dryRun: true` only counts. Matching is over the catalog; access is unchanged by it until the rows
+        are written.
+      parameters:
+        - $ref: "#/components/parameters/groupId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                roleName: { type: string, minLength: 1 }
+                filter:
+                  type: object
+                  properties:
+                    tenant: { type: array, items: { type: string } }
+                    project: { type: array, items: { type: string } }
+                    stage: { type: array, items: { type: string } }
+                q: { type: string, description: Narrows by account name or number (every whitespace-separated token must occur). }
+                dryRun: { type: boolean, default: false }
+              required: [roleName]
+            example: { roleName: "ReadOnly", filter: { tenant: ["acme"], stage: ["prod"] } }
+      responses:
+        "201":
+          description: At least one role was added.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GroupRolesBulkResult" }
+        "200":
+          description: Nothing new (every match was already bundled), or the dry run's count.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GroupRolesBulkResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/groups/suggest:
+    get:
+      tags: ["Admin: groups"]
+      summary: Groups to add a freshly registered role to
+      operationId: adminSuggestGroups
+      description: |
+        Groups that already bundle a role of this name in the account's sibling accounts — same tenant and stage by the
+        catalog's dimensions (deployments with `accountDimensions`). The role form offers them right after a role is
+        registered; adding is the single-role `POST /admin/groups/{groupId}/roles`. Empty without dimensions or siblings;
+        at most 10, most siblings first.
+      parameters:
+        - name: accountNumber
+          in: query
+          required: true
+          schema: { $ref: "#/components/schemas/AccountNumber" }
+        - name: roleName
+          in: query
+          required: true
+          schema: { type: string, minLength: 1 }
+      responses:
+        "200":
+          description: Suggested groups.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  suggestions:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        groupId: { type: string }
+                        name: { type: string }
+                        siblingAccounts: { type: integer, minimum: 1, description: Sibling accounts whose role of this name the group bundles. }
+                      required: [groupId, name, siblingAccounts]
+                required: [suggestions]
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/groups/{groupId}/roles/{accountNumber}/{roleName}:
+    delete:
+      tags: ["Admin: groups"]
+      summary: Remove one role from a group
+      operationId: adminRemoveGroupRole
+      description: Removes a single role from the bundle (members lose it unless held another way, and are noticed). A role not in the bundle is still `204`. The bundle's last target cannot be removed this way (`400`) — delete the group instead.
+      parameters:
+        - $ref: "#/components/parameters/groupId"
+        - $ref: "#/components/parameters/accountNumber"
+        - $ref: "#/components/parameters/roleName"
+      responses:
+        "204": { description: Removed, or was not there. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/groups/{groupId}/members:
+    post:
+      tags: ["Admin: groups"]
+      summary: Add members
+      operationId: adminAddMembers
+      description: Every new member inherits the whole bundle. Already-members are ignored.
+      parameters:
+        - $ref: "#/components/parameters/groupId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UserIdList" }
+            example: { userIds: ["1a2b3c4d-0000-4000-8000-000000000000"] }
+      responses:
+        "200":
+          description: How many members were added.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  added: { type: integer }
+                required: [added]
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/groups/{groupId}/members/remove:
+    post:
+      tags: ["Admin: groups"]
+      summary: Remove members
+      operationId: adminRemoveMembers
+      description: A POST because it carries a body. Only this group's access is pulled (losses are noticed).
+      parameters:
+        - $ref: "#/components/parameters/groupId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UserIdList" }
+            example: { userIds: ["1a2b3c4d-0000-4000-8000-000000000000"] }
+      responses:
+        "200":
+          description: How many members were removed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  removed: { type: integer }
+                required: [removed]
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/requests:
+    get:
+      tags: ["Admin: requests"]
+      summary: Queue or history
+      operationId: adminListRequests
+      description: With `status`, that queue (oldest first); without it, the full history (newest first). Rows carry the requester's email, service-user name, group name and resource name where applicable.
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string, enum: [PENDING, APPROVED, DENIED] }
+          example: PENDING
+        - name: usage
+          in: query
+          description: "`1` adds `usage` (the holder's role use in the review window) to pending reapprovals. Costly — only the Requests page sets it, never the bell poll."
+          schema: { type: string, enum: ["1"] }
+      responses:
+        "200":
+          description: Requests.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  requests:
+                    type: array
+                    items: { $ref: "#/components/schemas/AccessRequestAdminView" }
+                required: [requests]
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/requests/{requestId}/approve:
+    post:
+      tags: ["Admin: requests"]
+      summary: Approve
+      operationId: adminApproveRequest
+      description: Approves **and grants** (a role, a resource, or — for reviews — confirms the admin/service user/group). The approver's `durationHours` is final, overriding what was requested. `409` if another admin already decided.
+      parameters:
+        - $ref: "#/components/parameters/requestId"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                note: { type: string, maxLength: 500, description: Shown to the requester with the decision. }
+                durationHours: { $ref: "#/components/schemas/DurationHours" }
+            example: { note: "Approved for the incident.", durationHours: 24 }
+      responses:
+        "200":
+          description: The decided request.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RequestEnvelope" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/requests/{requestId}/deny:
+    post:
+      tags: ["Admin: requests"]
+      summary: Deny
+      operationId: adminDenyRequest
+      description: Grants nothing. For a reapproval/review, denying **ends** the standing access under review (losses are noticed). `409` if already decided.
+      parameters:
+        - $ref: "#/components/parameters/requestId"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                note: { type: string, maxLength: 500 }
+            example: { note: "Not needed for this role." }
+      responses:
+        "200":
+          description: The decided request.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RequestEnvelope" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/resources:
+    get:
+      tags: ["Admin: resources"]
+      summary: List resources
+      operationId: adminListResources
+      description: The private-network resource catalog with connection details.
+      responses:
+        "200":
+          description: Resources, sorted by name.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  resources:
+                    type: array
+                    items: { $ref: "#/components/schemas/Resource" }
+                required: [resources]
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/Upstream" }
+    post:
+      tags: ["Admin: resources"]
+      summary: Register a resource
+      operationId: adminCreateResource
+      description: A resource is reachable only through a site, so this is `501` on deployments without a private network. `cidr` accepts a bare IP or a /16–/32 CIDR. The account must be catalogued (`404`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ResourceCreate" }
+            example: { accountNumber: "123456789012", name: "Staging database", type: DATABASE, cidr: "10.0.1.25/32", ports: [5432], dnsName: "staging-db.internal", securityGroupId: "sg-0123456789abcdef0", description: "Postgres 16" }
+      responses:
+        "201":
+          description: The resource.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ResourceEnvelope" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "501": { $ref: "#/components/responses/NotDeployed" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/resources/status:
+    get:
+      tags: ["Admin: network"]
+      summary: Reconciler status
+      operationId: adminReconcilerStatus
+      description: The grants→ACL reconciler's last-pass summary — per-resource reachability verdicts, connector freshness, rule counts.
+      responses:
+        "200":
+          description: Status.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReconcilerStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/resources/{resourceId}:
+    patch:
+      tags: ["Admin: resources"]
+      summary: Update a resource
+      operationId: adminUpdateResource
+      description: At least one field. `accountNumber` is immutable (it IS the connector binding) — moving a resource means recreating it.
+      parameters:
+        - $ref: "#/components/parameters/resourceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ResourcePatch" }
+            example: { ports: [5432, 5433], description: "Postgres 16 + pgbouncer" }
+      responses:
+        "200":
+          description: The updated resource.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ResourceEnvelope" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/Upstream" }
+    delete:
+      tags: ["Admin: resources"]
+      summary: Remove a resource
+      operationId: adminDeleteResource
+      description: "**Cascades**: every grant on the resource is revoked (losses are noticed), groups bundling it drop it (a group left empty is removed), and its open requests and reviews are denied with the reason. Grants go before the catalog row, so a call that failed halfway can be repeated."
+      parameters:
+        - $ref: "#/components/parameters/resourceId"
+      responses:
+        "204": { description: Removed. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/resources/{resourceId}/grants:
+    get:
+      tags: ["Admin: resources"]
+      summary: Who can reach this resource
+      operationId: adminListResourceGrantees
+      parameters:
+        - $ref: "#/components/parameters/resourceId"
+      responses:
+        "200":
+          description: Holders with emails resolved.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  grantees:
+                    type: array
+                    items: { $ref: "#/components/schemas/ResourceGrantee" }
+                required: [grantees]
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/resources/{resourceId}/grants/{userId}:
+    put:
+      tags: ["Admin: resources"]
+      summary: Grant a resource
+      operationId: adminAssignResource
+      description: Idempotent; re-granting overwrites the expiry. A long-term grant is never downgraded. Reachability follows on the reconciler's next pass (≤ 5 min).
+      parameters:
+        - $ref: "#/components/parameters/resourceId"
+        - $ref: "#/components/parameters/userId"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                durationHours: { $ref: "#/components/schemas/DurationHours" }
+            example: { durationHours: 72 }
+      responses:
+        "200":
+          description: The grant.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  grant: { $ref: "#/components/schemas/UserResourceGrant" }
+                required: [grant]
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/Upstream" }
+    delete:
+      tags: ["Admin: resources"]
+      summary: Revoke a resource
+      operationId: adminRevokeResource
+      parameters:
+        - $ref: "#/components/parameters/resourceId"
+        - $ref: "#/components/parameters/userId"
+      responses:
+        "204": { description: Revoked. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/network:
+    get:
+      tags: ["Admin: network"]
+      summary: Network topology
+      operationId: adminNetworkTopology
+      description: Everything the admin Network map needs — the full site config (split DNS and declared VPCs included) plus the reconciler's last-pass status.
+      responses:
+        "200":
+          description: Sites and status.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sites:
+                    type: array
+                    items: { $ref: "#/components/schemas/NetworkSite" }
+                  status: { $ref: "#/components/schemas/ReconcilerStatus" }
+                required: [sites, status]
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/network/shares:
+    get:
+      tags: ["Admin: network"]
+      summary: Every live dev share
+      operationId: adminListDevShares
+      description: Owner, port, site, expiry and grantees of every unexpired share; stop one with `DELETE /network/shares/{shareId}` (admins may).
+      responses:
+        "200":
+          description: Soonest expiry first.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  shares: { type: array, items: { $ref: "#/components/schemas/DevShare" } }
+                required: [shares]
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "501": { $ref: "#/components/responses/NotDeployed" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/network/sync:
+    post:
+      tags: ["Admin: network"]
+      summary: Sync now
+      operationId: adminNetworkSync
+      description: Kicks the grants→ACL reconciler ahead of its 5-minute schedule. Fire-and-forget — re-read `GET /admin/resources/status` for the outcome.
+      responses:
+        "202":
+          description: Sync requested.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Message" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "501": { $ref: "#/components/responses/NotDeployed" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/audit:
+    get:
+      tags: ["Admin: audit"]
+      summary: The activity log
+      operationId: adminListAudit
+      description: |
+        Every recorded action, newest first: who did it, what, to whom or what, the outcome and why. The window is
+        `from`/`to` (a span of at most 90 days, anywhere inside the retention), or `days` back from now (default 7).
+        A full page (`limit`, default 200, max 1000) reports `nextBefore`; pass it back as `before` for older rows.
+        `user` (the person, group or service user an action was about) returns that subject's own trail. Per-user
+        derived rows (`derived: true`, written by the access diff for group, cascade and bulk changes) are hidden
+        unless `derived=true`. Names are joined from the directory,
+        the group list and the resource catalog; a caller deleted since carries `deleted: true` and their snapshot name.
+        Rows written before the general log (vend-only) are returned in the same shape.
+      parameters:
+        - name: from
+          in: query
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          schema: { type: string, format: date-time }
+        - name: before
+          in: query
+          description: Upper bound for the next page, inclusive (the previous page's `nextBefore`); send `skip` with it.
+          schema: { type: string, format: date-time }
+        - name: skip
+          in: query
+          description: Comma-separated event ids already held whose `at` equals `before` — rows written in one batch can share an instant, so the cursor is inclusive and these are left out.
+          schema: { type: string }
+        - name: days
+          in: query
+          description: Shorthand for `from` = now minus this many days.
+          schema: { type: integer, minimum: 1, maximum: 90 }
+          example: 7
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 200 }
+        - name: user
+          in: query
+          description: Subject ids, comma-separated (Cognito subs, group ids or service-user client ids; at most 10 — one indexed query each, merged). `userId` is accepted as an alias.
+          schema: { type: string }
+        - name: userId
+          in: query
+          deprecated: true
+          schema: { type: string }
+        - name: actor
+          in: query
+          description: Who did it, comma-separated (subs, client ids, or `system:<job>`; at most 10). Rows from before the general log are found by their caller; VPN session rows (`vpn.connect`/`vpn.disconnect`) by the person who connected, never by `system:reconciler`.
+          schema: { type: string }
+        - name: category
+          in: query
+          description: Comma-separated.
+          schema: { type: string, example: "access,request" }
+        - name: outcome
+          in: query
+          description: Comma-separated.
+          schema: { type: string, example: "DENIED,FAILED" }
+        - name: account
+          in: query
+          description: Comma-separated account numbers.
+          schema: { type: string }
+        - name: group
+          in: query
+          description: "Comma-separated group ids — everything about each group: its own rows, rows through it, rows where it is the subject."
+          schema: { type: string }
+        - name: target
+          in: query
+          description: Exact targets (`role#<account>#<name>`, `resource#<id>`, …). Repeat the parameter for several; a value is never split (a role name may contain a comma).
+          schema:
+            type: array
+            items: { type: string }
+          style: form
+          explode: true
+        - name: derived
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        "200":
+          description: One page of the log.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ActivityPage" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/access-report/jobs:
+    post:
+      tags: ["Admin: audit"]
+      summary: Build the access report in the background
+      operationId: adminStartAccessReport
+      description: Starts the report as a job (a large catalog produces more rows than one API call may carry) and answers at once with its id. Poll `GET /admin/access-report/jobs/{jobId}` until `status` is `done`, then download from `url` (valid 15 minutes). Only the admin who started a job can read it.
+      responses:
+        "202":
+          description: The job, running.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job: { $ref: "#/components/schemas/ReportJob" }
+                required: [job]
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/access-report/jobs/{jobId}:
+    get:
+      tags: ["Admin: audit"]
+      summary: An access report job
+      operationId: adminGetAccessReportJob
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The job; with `url` once done.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job: { $ref: "#/components/schemas/ReportJob" }
+                required: [job]
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/access-report:
+    get:
+      tags: ["Admin: audit"]
+      summary: Who can reach what right now (CSV)
+      operationId: adminAccessReport
+      description: One row per person (or service user) and target they hold this instant — how (direct, or through which groups), who granted it, when, until when, and when they were last seen. The log explains how each row came to be; this is the state. Built inline, so it fits only while the result stays under API Gateway's 6 MB; the app uses the job endpoints above.
+      responses:
+        "200":
+          description: "A CSV download (`Content-Disposition: attachment`), UTF-8 with BOM."
+          content:
+            text/csv:
+              schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /plugins:
+    get:
+      tags: [Plugins]
+      summary: Plugins this caller may open
+      operationId: listPlugins
+      description: >-
+        Metadata only, never plugin code. A plugin appears only where the caller has an available capability,
+        and a UI entry only where its own permission is available in at least one listed account. Account names
+        come from the Accounts catalog, so a caller holding nothing but a plugin grant still sees the account.
+        The feature being off, or no plugin being registered, is an empty list — never an error, and never
+        cached across callers.
+      responses:
+        "200":
+          description: The caller's plugins.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PluginDiscovery" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/plugins:
+    get:
+      tags: ["Admin: plugins"]
+      summary: Every plugin definition
+      operationId: adminListPlugins
+      description: >-
+        The grant editor's view: installed, disabled and unavailable definitions, plus tombstones still worth
+        labelling for grants that outlived them. Independent of the admin's own plugin grants, so a binding
+        nobody holds yet is still assignable. Handler internals and credentials are never included.
+      responses:
+        "200":
+          description: The catalog.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PluginAdminCatalog" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/users/{userId}/plugin-grants:
+    get:
+      tags: ["Admin: plugins"]
+      summary: A user's plugin access
+      operationId: adminListUserPluginGrants
+      description: >-
+        Their stored plugin rows (expired and dormant included, so the editor can show why one does nothing)
+        and the capabilities those add up to, direct and through groups. A sibling of the resource-grants
+        view: one call covers every plugin, so the user page never sweeps per-plugin endpoints.
+      parameters:
+        - $ref: "#/components/parameters/userId"
+      responses:
+        "200":
+          description: Stored assignments and effective capabilities.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserPluginAccess" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/groups/{groupId}/plugin-grants:
+    get:
+      tags: ["Admin: plugins"]
+      summary: A group's plugin assignments
+      operationId: adminListGroupPluginGrants
+      description: >-
+        The bindings this group hands its members, each marked with whether it can authorize anything right
+        now. The groups list carries the same bindings as bare references; this adds the availability the
+        editor needs to show a dormant assignment as dormant and still offer to revoke it.
+      parameters:
+        - $ref: "#/components/parameters/groupId"
+      responses:
+        "200":
+          description: The group's assignments.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  assignments:
+                    type: array
+                    items: { $ref: "#/components/schemas/PluginAssignment" }
+                required: [assignments]
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/plugins/{pluginId}/accounts/{accountNumber}/grants:
+    get:
+      tags: ["Admin: plugins"]
+      summary: Who holds this plugin binding
+      operationId: adminListPluginGrants
+      description: Stored assignments (users and groups, expired rows included) and the effective holders with provenance.
+      parameters:
+        - $ref: "#/components/parameters/pluginId"
+        - $ref: "#/components/parameters/accountNumber"
+      responses:
+        "200":
+          description: Assignments and holders.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  assignments:
+                    type: array
+                    items: { $ref: "#/components/schemas/PluginAssignment" }
+                  holders:
+                    type: array
+                    items: { $ref: "#/components/schemas/PluginHolder" }
+                required: [assignments, holders]
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/Upstream" }
+    put:
+      tags: ["Admin: plugins"]
+      summary: Assign plugin access
+      operationId: adminAssignPlugin
+      description: >-
+        Idempotent; re-assigning rewrites the row (the extend path) and never downgrades a long-term grant to
+        a temporary one. Groups are standing, so an expiry on a group is refused. 409 when the plugin is
+        installed but the binding is unavailable (disabled, removed, unsupported, or an unregistered account).
+      parameters:
+        - $ref: "#/components/parameters/pluginId"
+        - $ref: "#/components/parameters/accountNumber"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                principal: { $ref: "#/components/schemas/PluginPrincipal" }
+                permission: { $ref: "#/components/schemas/PluginPermission" }
+                durationHours: { $ref: "#/components/schemas/DurationHours" }
+              required: [principal, permission]
+            example: { principal: { kind: user, userId: 6f1e2d3c-0000-4000-8000-000000000001 }, permission: user }
+      responses:
+        "200":
+          description: The stored assignment.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  assignment: { $ref: "#/components/schemas/PluginAssignment" }
+                required: [assignment]
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "502": { $ref: "#/components/responses/Upstream" }
+    delete:
+      tags: ["Admin: plugins"]
+      summary: Revoke plugin access
+      operationId: adminRevokePlugin
+      description: >-
+        Idempotent, and deliberately unconditional: a stale row on a disabled or removed plugin stays
+        revocable, so availability is not checked first. Holders who lose a capability are noticed.
+      parameters:
+        - $ref: "#/components/parameters/pluginId"
+        - $ref: "#/components/parameters/accountNumber"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                principal: { $ref: "#/components/schemas/PluginPrincipal" }
+                permission: { $ref: "#/components/schemas/PluginPermission" }
+              required: [principal, permission]
+            example: { principal: { kind: group, groupId: platform-team }, permission: admin }
+      responses:
+        "204": { description: Revoked (or there was nothing to revoke — this is idempotent). }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: The named group does not exist. }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: A Cognito ID token (humans) or a `client_credentials` access token with the `api/invoke` scope (service users).
+
+  parameters:
+    accountNumber:
+      name: accountNumber
+      in: path
+      required: true
+      schema: { $ref: "#/components/schemas/AccountNumber" }
+    roleName:
+      name: roleName
+      in: path
+      required: true
+      description: The IAM role name as catalogued (not the ARN).
+      schema: { type: string }
+    role:
+      name: role
+      in: path
+      required: true
+      description: The IAM role name as catalogued (not the ARN).
+      schema: { type: string }
+    userId:
+      name: userId
+      in: path
+      required: true
+      description: A Cognito `sub`, or a service user's client id.
+      schema: { type: string }
+    requestId:
+      name: requestId
+      in: path
+      required: true
+      schema: { type: string }
+    groupId:
+      name: groupId
+      in: path
+      required: true
+      schema: { type: string }
+    resourceId:
+      name: resourceId
+      in: path
+      required: true
+      schema: { type: string }
+    pluginId:
+      name: pluginId
+      in: path
+      required: true
+      description: The plugin's registered id.
+      schema: { type: string, pattern: "^[a-z][a-z0-9-]{0,63}$" }
+      example: parameters
+    clientId:
+      name: clientId
+      in: path
+      required: true
+      description: A Cognito app client id (lowercase alphanumerics).
+      schema: { type: string, pattern: "^[a-z0-9]{1,128}$" }
+    # The list contract (catalog-sized lists): pass `limit` to receive one page — `{ items, nextCursor, total,
+    # facets }` — instead of the whole list. Pages are cut in the API from an in-memory catalog index after
+    # access is decided, so search is substring-by-token, sorts are any listed key, totals are exact.
+    listQ:
+      name: q
+      in: query
+      description: Whitespace-separated tokens; every token must occur (case-insensitive substring) in the row's searchable text (name, number, role names).
+      schema: { type: string }
+    listFilter:
+      name: filter
+      in: query
+      description: Facet filters, `filter[key]=a,b` (any of the listed values; keys AND together). Each route names its facet keys.
+      style: deepObject
+      explode: true
+      schema:
+        type: object
+        additionalProperties: { type: string }
+    listSort:
+      name: sort
+      in: query
+      description: A sort key the route lists; prefix `-` for descending. Ties break on the row id.
+      schema: { type: string }
+    listLimit:
+      name: limit
+      in: query
+      description: Page size, 1–200. Present = paged response; absent = the whole list (older clients).
+      schema: { type: integer, minimum: 1, maximum: 200 }
+    listCursor:
+      name: cursor
+      in: query
+      description: The previous page's `nextCursor`. Opaque; tied to the same `q`/`filter`/`sort` (400 otherwise). Rows inserted or removed between pages are neither skipped nor repeated.
+      schema: { type: string }
+
+  responses:
+    BadRequest:
+      description: Malformed input — the message says which field.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: Missing, invalid or expired bearer token.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: Admin access required.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: The addressed thing does not exist.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: Already exists, still in use, or already decided.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotDeployed:
+      description: The feature is not deployed on this installation.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Upstream:
+      description: A downstream AWS call failed (details stay in the Lambda log).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    ReportJob:
+      type: object
+      properties:
+        jobId: { type: string, format: uuid }
+        kind: { type: string, enum: [accessReport] }
+        status: { type: string, enum: [running, done, failed] }
+        requestedBy: { type: string }
+        startedAt: { type: string, format: date-time }
+        finishedAt: { type: string, format: date-time }
+        rows: { type: integer, minimum: 0 }
+        error: { type: string }
+        url: { type: string, format: uri, description: Presigned download, present once `done`; valid 15 minutes. }
+      required: [jobId, kind, status, requestedBy, startedAt]
+    ListPage:
+      type: object
+      description: One page of the list contract. `items` is typed per route.
+      properties:
+        nextCursor: { type: string, description: Pass as `cursor` for the next page; absent on the last page. }
+        total: { type: integer, minimum: 0, description: Rows matching `q` and the filters, across all pages. }
+        facets:
+          type: object
+          description: "Per facet key: value → row count over the rows matching `q` and the OTHER facets' filters (so a filtered facet still shows its alternatives)."
+          additionalProperties:
+            type: object
+            additionalProperties: { type: integer }
+      required: [total, facets]
+    AccountAccessPage:
+      allOf:
+        - $ref: "#/components/schemas/ListPage"
+        - type: object
+          properties:
+            items: { type: array, items: { $ref: "#/components/schemas/AccountAccess" } }
+          required: [items]
+    RequestableAccountPage:
+      allOf:
+        - $ref: "#/components/schemas/ListPage"
+        - type: object
+          properties:
+            items: { type: array, items: { $ref: "#/components/schemas/RequestableAccount" } }
+          required: [items]
+    AdminAccountPage:
+      allOf:
+        - $ref: "#/components/schemas/ListPage"
+        - type: object
+          properties:
+            items: { type: array, items: { $ref: "#/components/schemas/AdminAccount" } }
+          required: [items]
+    UserPage:
+      allOf:
+        - $ref: "#/components/schemas/ListPage"
+        - type: object
+          properties:
+            items: { type: array, items: { $ref: "#/components/schemas/User" } }
+          required: [items]
+    PluginPermission:
+      type: string
+      enum: [user, admin]
+      description: A plugin's two permission levels. `admin` includes `user` only where the plugin declares `user`.
+    PluginPrincipal:
+      type: object
+      description: Who a plugin assignment is for. Groups are standing — they carry no expiry.
+      oneOf:
+        - type: object
+          properties:
+            kind: { type: string, enum: [user] }
+            userId: { type: string, description: Cognito sub. }
+          required: [kind, userId]
+        - type: object
+          properties:
+            kind: { type: string, enum: [group] }
+            groupId: { type: string }
+          required: [kind, groupId]
+    PluginUnavailableReason:
+      type: string
+      enum: [plugin-unknown, plugin-disabled, plugin-removed, plugin-unsupported, permission-undeclared, account-unbound, account-unregistered]
+      description: Why a stored row cannot authorize anything right now.
+    PluginAssignment:
+      type: object
+      description: One stored grant row, as the editor sees it. A row that is expired or unavailable is kept, shown, and revocable.
+      properties:
+        pluginId: { type: string }
+        accountNumber: { type: string }
+        permission: { $ref: "#/components/schemas/PluginPermission" }
+        principal: { $ref: "#/components/schemas/PluginPrincipal" }
+        grantedBy: { type: string }
+        grantedAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+        expired: { type: boolean }
+        available: { type: boolean, description: Whether this row can authorize anything right now. }
+        reason: { $ref: "#/components/schemas/PluginUnavailableReason" }
+      required: [pluginId, accountNumber, permission, principal, expired, available]
+    PluginCapability:
+      type: object
+      description: An effective capability, with the stored grants behind it. Implication is applied here, never stored.
+      properties:
+        pluginId: { type: string }
+        accountNumber: { type: string }
+        permission: { $ref: "#/components/schemas/PluginPermission" }
+        available: { type: boolean }
+        reason: { $ref: "#/components/schemas/PluginUnavailableReason" }
+        sources:
+          type: array
+          description: The grants this capability cites — a user capability may cite an admin grant, never the reverse.
+          items:
+            type: object
+            properties:
+              permission: { $ref: "#/components/schemas/PluginPermission" }
+              groups: { type: array, items: { type: string } }
+            required: [permission, groups]
+      required: [pluginId, accountNumber, permission, available, sources]
+    PluginHolder:
+      type: object
+      description: Someone who can use the binding right now, directly or through a group.
+      properties:
+        userId: { type: string }
+        email: { type: string }
+        capabilities:
+          type: array
+          items: { $ref: "#/components/schemas/PluginCapability" }
+      required: [userId, capabilities]
+    UserPluginAccess:
+      type: object
+      description: A user's stored plugin rows and the capabilities they add up to (direct plus via groups).
+      properties:
+        assignments:
+          type: array
+          items: { $ref: "#/components/schemas/PluginAssignment" }
+        capabilities:
+          type: array
+          items: { $ref: "#/components/schemas/PluginCapability" }
+      required: [assignments, capabilities]
+    PluginDiscoveryUiEntry:
+      type: object
+      properties:
+        label: { type: string }
+        icon: { type: string }
+        order: { type: integer }
+        url: { type: string, description: Absolute path on the portal origin, under the plugin's immutable asset prefix. }
+      required: [label, url]
+    PluginDiscovery:
+      type: object
+      description: Caller discovery. An empty list means the feature is off or nothing is registered.
+      properties:
+        schemaVersion: { type: integer, enum: [1] }
+        refreshAfterSeconds: { type: integer, description: How long the portal may keep this before refreshing (15–300). }
+        plugins:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              displayName: { type: string }
+              description: { type: string }
+              version: { type: string }
+              revision: { type: string }
+              apiBaseUrl: { type: string }
+              ui:
+                type: object
+                properties:
+                  user: { $ref: "#/components/schemas/PluginDiscoveryUiEntry" }
+                  admin: { $ref: "#/components/schemas/PluginDiscoveryUiEntry" }
+              accounts:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    accountNumber: { type: string }
+                    displayName: { type: string, description: From the Accounts catalog, not from any IAM role grant. }
+                    regions: { type: array, items: { type: string } }
+                    permissions:
+                      type: array
+                      description: Effective capabilities on this account, not stored assignments.
+                      items: { $ref: "#/components/schemas/PluginPermission" }
+                  required: [accountNumber, displayName, permissions]
+            required: [id, displayName, version, revision, apiBaseUrl, ui, accounts]
+      required: [schemaVersion, refreshAfterSeconds, plugins]
+    PluginAdminCatalog:
+      type: object
+      description: Every definition, for the grant editor.
+      properties:
+        schemaVersion: { type: integer, enum: [1] }
+        plugins:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              displayName: { type: string }
+              description: { type: string }
+              version: { type: string }
+              revision: { type: string }
+              schemaVersion: { type: integer }
+              hostApiVersion: { type: integer }
+              status: { type: string, enum: [active, disabled, removed, unsupported] }
+              enabled: { type: boolean }
+              installed: { type: boolean, description: false = tombstone, kept so historical grants keep their labels. }
+              permissions:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { $ref: "#/components/schemas/PluginPermission" }
+                    label: { type: string }
+                    description: { type: string }
+                    implies:
+                      type: array
+                      items: { $ref: "#/components/schemas/PluginPermission" }
+                  required: [id, label, implies]
+              accounts:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    accountNumber: { type: string }
+                    displayName: { type: string }
+                    regions: { type: array, items: { type: string } }
+                    available: { type: boolean }
+                    reason: { type: string, enum: [unregistered] }
+                  required: [accountNumber, available]
+              ui:
+                type: object
+                properties:
+                  user: { type: object, properties: { label: { type: string }, icon: { type: string }, order: { type: integer } }, required: [label] }
+                  admin: { type: object, properties: { label: { type: string }, icon: { type: string }, order: { type: integer } }, required: [label] }
+              routes:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string }
+                    method: { type: string }
+                    path: { type: string }
+                    permission: { $ref: "#/components/schemas/PluginPermission" }
+                  required: [id, method, path, permission]
+              updatedAt: { type: string, format: date-time }
+            required: [id, displayName, version, revision, schemaVersion, hostApiVersion, status, enabled, installed, permissions, accounts, ui, routes, updatedAt]
+      required: [schemaVersion, plugins]
+    Error:
+      type: object
+      properties:
+        message: { type: string }
+      required: [message]
+    Message:
+      type: object
+      properties:
+        message: { type: string }
+      required: [message]
+    Cleared:
+      type: object
+      properties:
+        cleared: { type: integer, description: How many rows were newly marked seen. }
+      required: [cleared]
+    AccountNumber:
+      type: string
+      pattern: "^\\d{12}$"
+      description: 12-digit AWS account id.
+      example: "123456789012"
+    DurationHours:
+      type: integer
+      enum: [1, 12, 24, 72, 168, 720]
+      description: Temporary-access preset in hours (1 h, 12 h, 1 d, 3 d, 7 d, 30 d). Omit for long-term access.
+    RoleRef:
+      type: object
+      properties:
+        accountNumber: { $ref: "#/components/schemas/AccountNumber" }
+        roleName: { type: string }
+      required: [accountNumber, roleName]
+    UserIdList:
+      type: object
+      properties:
+        userIds: { type: array, items: { type: string }, minItems: 1 }
+      required: [userIds]
+    ProfileNameValue:
+      type: object
+      properties:
+        profileName: { type: [string, "null"] }
+      required: [profileName]
+
+    Discovery:
+      type: object
+      properties:
+        projectName: { type: string, description: "Empty when unset — clients fall back to the hostname." }
+        cognito:
+          type: object
+          properties:
+            userPoolId: { type: string }
+            clientId: { type: string }
+            region: { type: string }
+          required: [userPoolId, clientId, region]
+        issuer: { type: string, format: uri, description: The OIDC issuer URL baked into cross-account trust. }
+        network:
+          type: [object, "null"]
+          description: "`null` when no private network is deployed."
+          properties:
+            controlUrl: { type: string, format: uri, description: Legacy single-site field (first site). }
+            sites:
+              type: array
+              items:
+                type: object
+                properties:
+                  id: { type: string }
+                  displayName: { type: string }
+                  controlUrl: { type: string, format: uri }
+                required: [id, displayName, controlUrl]
+          required: [controlUrl, sites]
+      required: [projectName, cognito, issuer, network]
+
+    AccountAccess:
+      type: object
+      properties:
+        accountNumber: { $ref: "#/components/schemas/AccountNumber" }
+        name: { type: string, description: Admin-set friendly name. }
+        environment: { type: string }
+        dims: { $ref: "#/components/schemas/AccountDims" }
+        sortOrder: { type: integer, minimum: 0, description: Admin-set display position; the list is already in this order. }
+        position: { type: integer, minimum: 0, description: Index in the admin order (the `position` sort key). }
+        main: { type: boolean, enum: [false], description: Present (false) only for an account an admin took off the dashboard's Main section. }
+        roles:
+          type: array
+          items: { $ref: "#/components/schemas/RoleAccess" }
+      required: [accountNumber, position, roles]
+    RoleAccess:
+      type: object
+      properties:
+        role: { type: string }
+        roleArn: { type: string }
+        displayName: { type: string }
+        description: { type: string }
+        icon: { type: string }
+        expiresAt: { type: string, format: date-time, description: End of a temporary grant; absent = long-term. }
+        profileName: { type: string, description: THE `~/.aws` profile name for this role — what the desktop writes. }
+        profileSource: { type: string, enum: [override, account, role, default] }
+        suggestedProfileName: { type: string, description: What the name would be without the caller's override. }
+      required: [role, roleArn, profileName, profileSource, suggestedProfileName]
+    VendedCredentials:
+      type: object
+      properties:
+        accessKeyId: { type: string }
+        secretKey: { type: string }
+        sessionToken: { type: string }
+        expiration: { type: string, format: date-time }
+      required: [accessKeyId, secretKey, sessionToken]
+    ConsoleSignIn:
+      type: object
+      properties:
+        url: { type: string, format: uri, description: Short-lived federation sign-in URL. }
+        expiration: { type: string, format: date-time }
+      required: [url]
+    ExpiryNotice:
+      type: object
+      properties:
+        accountNumber: { $ref: "#/components/schemas/AccountNumber" }
+        roleName: { type: string }
+        expiresAt: { type: string, format: date-time }
+        seen: { type: boolean, description: Acknowledged for THIS phase (expiring vs expired). }
+      required: [accountNumber, roleName, expiresAt, seen]
+    ExpiryNotices:
+      type: object
+      properties:
+        expiring: { type: array, items: { $ref: "#/components/schemas/ExpiryNotice" } }
+        expired: { type: array, items: { $ref: "#/components/schemas/ExpiryNotice" } }
+      required: [expiring, expired]
+
+    RequestableAccount:
+      type: object
+      properties:
+        accountNumber: { $ref: "#/components/schemas/AccountNumber" }
+        name: { type: string }
+        dims: { $ref: "#/components/schemas/AccountDims" }
+        roles:
+          type: array
+          items:
+            type: object
+            properties:
+              roleName: { type: string }
+              displayName: { type: string }
+              description: { type: string }
+            required: [roleName]
+      required: [accountNumber, roles]
+    RequestableResource:
+      type: object
+      properties:
+        resourceId: { type: string }
+        name: { type: string }
+        type: { $ref: "#/components/schemas/ResourceType" }
+        description: { type: string }
+        accountNumber: { $ref: "#/components/schemas/AccountNumber" }
+        accountName: { type: string }
+      required: [resourceId, name, type, accountNumber]
+    AccessRequest:
+      type: object
+      description: One access request or review. `kind` says what is under decision; `type` whether it was raised by a user (`ACCESS`) or by the periodic review sweep (`REAPPROVAL`).
+      properties:
+        requestId: { type: string }
+        userId: { type: string, description: "The requester's sub (reapproval: the holder; group reapproval: the groupId; service-user review: the client id)." }
+        kind: { type: string, enum: [ROLE, RESOURCE, ADMIN, SERVICE_USER, PLUGIN, GROUP], description: "PLUGIN = a plugin permission (pluginId + accountNumber + permission); GROUP = the yearly review of a whole group's bundle (userId and groupId are the group; approve restarts its clock, deny deletes the group). Both reapproval-only." }
+        type: { type: string, enum: [ACCESS, REAPPROVAL] }
+        groupId: { type: string, description: Set on group reapprovals. }
+        accountNumber: { $ref: "#/components/schemas/AccountNumber" }
+        roleName: { type: string }
+        resourceId: { type: string }
+        pluginId: { type: string, description: Set on PLUGIN rows. }
+        permission: { type: string, enum: [user, admin], description: Set on PLUGIN rows. }
+        resourceName: { type: string, description: Resolved by the route on RESOURCE rows. }
+        reason: { type: string }
+        requestedDurationHours: { $ref: "#/components/schemas/DurationHours" }
+        grantedDurationHours: { $ref: "#/components/schemas/DurationHours" }
+        status: { type: string, enum: [PENDING, APPROVED, DENIED] }
+        createdAt: { type: string, format: date-time }
+        decidedAt: { type: string, format: date-time }
+        decidedBy: { type: string }
+        decisionNote: { type: string }
+        seen: { type: boolean, description: Requester acknowledged the decision. }
+      required: [requestId, userId, status, createdAt]
+    AccessRequestAdminView:
+      allOf:
+        - $ref: "#/components/schemas/AccessRequest"
+        - type: object
+          properties:
+            email: { type: string, description: Requester's email; empty if the user is gone. }
+            serviceUser: { type: string, description: Registry name when the requester is a service user. }
+            group: { type: string, description: Group name on group reapprovals. }
+            usage:
+              type: object
+              description: Only with `?usage=1` on pending role reapprovals.
+              properties:
+                count: { type: integer }
+                lastAt: { type: string, format: date-time }
+              required: [count]
+          required: [email]
+    RequestEnvelope:
+      type: object
+      properties:
+        request: { $ref: "#/components/schemas/AccessRequest" }
+      required: [request]
+
+    RolePreference:
+      type: object
+      properties:
+        accountNumber: { $ref: "#/components/schemas/AccountNumber" }
+        role: { type: string }
+        profileName: { type: [string, "null"] }
+        roleLabel: { type: [string, "null"] }
+        autoVend: { type: boolean }
+      required: [accountNumber, role, profileName, roleLabel, autoVend]
+    NetworkPrefs:
+      type: object
+      properties:
+        autoReconnect: { type: boolean }
+        lastSiteId: { type: [string, "null"] }
+      required: [autoReconnect, lastSiteId]
+
+    NotificationPrefs:
+      type: object
+      properties:
+        enabled: { type: boolean, description: Master switch. }
+        kinds:
+          type: object
+          description: Per item kind — granted (a direct grant), revoked, decided (a request decision), expiring (temporary access near or past its end), session (the sign-in is about to reach its cap), requests (admins — a new request waiting), reviews (admins — yearly reviews raised).
+          additionalProperties: { type: boolean }
+      required: [enabled, kinds]
+
+    PublicSite:
+      type: object
+      properties:
+        id: { type: string }
+        displayName: { type: string }
+        controlUrl: { type: string, format: uri }
+        accounts: { type: array, items: { $ref: "#/components/schemas/AccountNumber" }, description: Accounts in this routing domain. }
+      required: [id, controlUrl, accounts]
+    NetworkSite:
+      allOf:
+        - $ref: "#/components/schemas/PublicSite"
+        - type: object
+          properties:
+            splitDns:
+              type: object
+              additionalProperties: { type: array, items: { type: string } }
+              description: Private zone → resolver IPs.
+            connectorVpcs:
+              type: object
+              additionalProperties:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    vpcId: { type: string }
+                    routes: { type: array, items: { type: string } }
+                    region: { type: string, description: Set when the VPC is outside the hub's region. }
+                    name: { type: string, description: Set for every connector VPC of an account but its one unnamed VPC; suffixes the connector hostname. }
+                  required: [vpcId, routes]
+              description: Keyed by account number, one entry per connector VPC.
+    DevShareGrantee:
+      type: object
+      properties:
+        kind: { type: string, enum: [user, group] }
+        id: { type: string }
+        name: { type: string, description: Email (user) or group name; the id when the directory no longer knows it. }
+      required: [kind, id, name]
+    DevShare:
+      type: object
+      description: A dev share as its owner (or an admin) sees it.
+      properties:
+        shareId: { type: string, pattern: "^[a-f0-9]{12}$" }
+        ownerSub: { type: string }
+        ownerName: { type: string, description: The owner's email at creation. }
+        port: { type: integer }
+        label: { type: string }
+        siteId: { type: string }
+        hostname: { type: string }
+        ip: { type: string }
+        url:
+          type: [string, "null"]
+          description: "`http://<hostname|ip>:<port>`; null until the desktop app reported an address."
+        createdAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+        grantees: { type: array, items: { $ref: "#/components/schemas/DevShareGrantee" } }
+      required: [shareId, ownerSub, ownerName, port, label, siteId, url, createdAt, expiresAt, grantees]
+    DevShareWithMe:
+      type: object
+      description: A dev share as a grantee sees it (no grantee list).
+      properties:
+        shareId: { type: string }
+        ownerSub: { type: string }
+        ownerName: { type: string }
+        port: { type: integer }
+        label: { type: string }
+        siteId: { type: string }
+        url: { type: [string, "null"] }
+        expiresAt: { type: string, format: date-time }
+        viaGroups:
+          type: array
+          items: { type: string }
+          description: Names of the caller's groups the share came through; empty = granted directly.
+      required: [shareId, ownerSub, ownerName, port, label, siteId, url, expiresAt, viaGroups]
+    DevShareDirectory:
+      type: object
+      properties:
+        users:
+          type: array
+          items:
+            type: object
+            properties:
+              userId: { type: string }
+              email: { type: string }
+            required: [userId, email]
+        groups:
+          type: array
+          items:
+            type: object
+            properties:
+              groupId: { type: string }
+              name: { type: string }
+              members: { type: integer }
+            required: [groupId, name, members]
+      required: [users, groups]
+
+    DeviceKey:
+      type: object
+      properties:
+        key: { type: string, description: Single-use enrollment key. }
+        expiresAt: { type: string, format: date-time }
+        controlUrl: { type: string, format: uri }
+        siteId: { type: string }
+      required: [key, expiresAt, controlUrl, siteId]
+
+    ResourceType:
+      type: string
+      enum: [DATABASE, WEB, HOST]
+    ReachableResource:
+      type: object
+      properties:
+        resourceId: { type: string }
+        name: { type: string }
+        type: { $ref: "#/components/schemas/ResourceType" }
+        cidr: { type: string }
+        ports: { type: array, items: { type: integer } }
+        dnsName: { type: string }
+        sshUser: { type: string }
+        description: { type: string }
+        accountNumber: { $ref: "#/components/schemas/AccountNumber" }
+        accountName: { type: string }
+        expiresAt: { type: string, format: date-time, description: Absent = long-term. }
+      required: [resourceId, name, type, cidr, ports, accountNumber]
+    ResourceExpiryNotice:
+      type: object
+      properties:
+        resourceId: { type: string }
+        name: { type: string }
+        expiresAt: { type: string, format: date-time }
+        seen: { type: boolean }
+      required: [resourceId, name, expiresAt, seen]
+    RevocationNotice:
+      type: object
+      description: One access change for the bell — a loss, or (since the activity log) a gain the person did not ask for. `revokedAt` is the notice's timestamp either way.
+      properties:
+        noticeId: { type: string }
+        change: { type: string, enum: [GRANTED, REVOKED], description: Rows written before grants were noticed are REVOKED. }
+        kind: { type: string, enum: [ROLE, RESOURCE, SHARE, PLUGIN, BUNDLE], description: SHARE = a dev share stopped early (resourceId = share id, resourceName = its label). PLUGIN = a plugin permission lost (pluginId + accountNumber + permission, pluginName = the plugin's display name). BUNDLE = one row for `count` targets that changed together (more than five gained or lost by one person through a group membership or bundle edit, or a cascade); groupId/groupName when a group carried it. Direct admin grants and revokes stay one row per target. }
+        accountNumber: { $ref: "#/components/schemas/AccountNumber" }
+        roleName: { type: string }
+        resourceId: { type: string }
+        resourceName: { type: string }
+        pluginId: { type: string }
+        permission: { type: string, enum: [user, admin] }
+        pluginName: { type: string }
+        count: { type: integer, description: BUNDLE only — how many targets the row stands for. }
+        groupId: { type: string, description: BUNDLE only — the group whose membership or bundle edit carried the change. }
+        groupName: { type: string, description: BUNDLE only — that group's name at the time. }
+        revokedAt: { type: string, format: date-time }
+        via: { type: string, enum: [ADMIN, GROUP, REAPPROVAL, CASCADE, OWNER] }
+        seen: { type: boolean }
+      required: [noticeId, change, kind, revokedAt, via, seen]
+
+    SetupStatus:
+      type: object
+      properties:
+        issuerUrl: { type: string, format: uri }
+        region: { type: string }
+        emailConfigured: { type: boolean }
+        emailFrom: { type: string }
+        accounts: { type: integer }
+        roles: { type: integer }
+        usersTotal: { type: integer }
+        invitedActive: { type: boolean, description: Someone other than the caller has finished sign-in. }
+        vended: { type: boolean, description: At least one successful vend or console-open is on record. }
+        configAccounts:
+          type: array
+          items:
+            type: object
+            properties:
+              accountNumber: { $ref: "#/components/schemas/AccountNumber" }
+              roles: { type: array, items: { type: string } }
+              registered: { type: boolean }
+            required: [accountNumber, roles, registered]
+      required: [issuerUrl, region, emailConfigured, accounts, roles, usersTotal, invitedActive, vended, configAccounts]
+    BrandingOverlay:
+      type: object
+      properties:
+        projectName: { type: string }
+        logoUrl: { type: string, description: "`https://` URL or `data:image/*` URI (≤ 64 KB)." }
+        primaryColor: { type: string, pattern: "^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$" }
+        primaryHoverColor: { type: string }
+        accentColor: { type: string }
+        grayTone: { type: string }
+        radius: { type: string }
+        iconSet: { type: string, enum: [outline, bold, solid] }
+        panelStrength: { type: integer, minimum: 0, maximum: 100 }
+        accentDepth: { type: integer, minimum: 0, maximum: 100 }
+        borderStrength: { type: integer, minimum: 0, maximum: 100 }
+        gradientStrength: { type: integer, minimum: 0, maximum: 100 }
+
+    AdminAccount:
+      type: object
+      properties:
+        accountNumber: { $ref: "#/components/schemas/AccountNumber" }
+        name: { type: string }
+        environment: { type: string }
+        status: { type: string }
+        profileName: { type: string }
+        sortOrder: { type: integer, minimum: 0, description: "Display position (PUT /admin/accounts/order); absent = after the ordered ones. The list is already in this order." }
+        main: { type: boolean, description: "Shown in everyone's dashboard Main section (the default). Sections appear on a user's dashboard only once they hold an account that is not main." }
+        dims: { $ref: "#/components/schemas/AccountDims" }
+        position: { type: integer, minimum: 0, description: Index in the admin order (the `position` sort key). }
+        roles: { type: array, items: { $ref: "#/components/schemas/AdminRole" } }
+      required: [accountNumber, roles]
+    DashboardLayout:
+      type: object
+      properties:
+        mode: { type: string, enum: [auto, sections, plain] }
+      required: [mode]
+    AccountDims:
+      type: object
+      description: |
+        Account dimensions (deployments with `accountDimensions` on): read off the name at registration — first hyphen-separated
+        segment = tenant, last = stage, the rest = project (`acme-data-platform-prod`; `acme-prod` has no project) — editable by an
+        admin afterwards and never re-derived when the account is renamed. They filter lists; they never decide access.
+      properties:
+        tenant: { type: string, minLength: 1 }
+        project: { type: string, minLength: 1 }
+        stage: { type: string, minLength: 1 }
+      required: [tenant, stage]
+    AdminRole:
+      type: object
+      properties:
+        roleName: { type: string }
+        displayName: { type: string }
+        roleArn: { type: string }
+        policyTier: { type: string }
+        description: { type: string }
+        color: { type: string, description: "Chip tint `#rrggbb`." }
+        icon: { type: string, enum: [view, admin, operate, deploy, data, billing, analytics, access] }
+        profileName: { type: string }
+        sessionDurationSeconds: { type: integer, minimum: 900, maximum: 43200 }
+        sortOrder: { type: integer, minimum: 0, description: "Display position inside the account (PUT /admin/accounts/order); absent = after the ordered ones. Lists are already in this order." }
+        grantees: { type: integer, description: Unexpired holders (list route only). }
+      required: [roleName, roleArn]
+    AccountEnvelope:
+      type: object
+      properties:
+        account: { $ref: "#/components/schemas/AdminAccount" }
+      required: [account]
+    RoleEnvelope:
+      type: object
+      properties:
+        role: { $ref: "#/components/schemas/AdminRole" }
+      required: [role]
+    ProfileName:
+      type: string
+      pattern: "^([A-Za-z0-9][A-Za-z0-9_.-]{0,63})?$"
+      description: A `~/.aws/credentials` section name (letters, digits, `.`, `_`, `-`); empty string clears.
+    AccountCreate:
+      type: object
+      properties:
+        accountNumber: { $ref: "#/components/schemas/AccountNumber" }
+        name: { type: string }
+        environment: { type: string }
+        status: { type: string }
+        profileName: { $ref: "#/components/schemas/ProfileName" }
+        main: { type: boolean, default: true, description: "On everyone's dashboard Main section. A pipeline registering rarely used accounts passes false." }
+        dims: { $ref: "#/components/schemas/AccountDims", description: "Explicit dimensions (a pipeline that knows them). Omitted, they are read off `name` when the deployment has account dimensions on." }
+      required: [accountNumber]
+    AccountOrder:
+      type: object
+      properties:
+        accounts:
+          type: array
+          minItems: 1
+          maxItems: 5000
+          items:
+            type: object
+            properties:
+              accountNumber: { $ref: "#/components/schemas/AccountNumber" }
+              roles:
+                type: array
+                maxItems: 200
+                uniqueItems: true
+                items: { type: string, minLength: 1, maxLength: 64 }
+                description: The account's roles, first to last; omit to leave their positions alone.
+            required: [accountNumber]
+      required: [accounts]
+    AccountPatch:
+      type: object
+      description: At least one field.
+      properties:
+        name: { type: string }
+        environment: { type: string }
+        status: { type: string }
+        profileName: { $ref: "#/components/schemas/ProfileName" }
+        main: { type: boolean, description: "On everyone's dashboard Main section (true is the default state of an account)." }
+        dims:
+          oneOf:
+            - $ref: "#/components/schemas/AccountDims"
+            - type: "null"
+          description: The admin's correction of tenant / project / stage; `null` clears them. A rename never changes them.
+    RoleCreate:
+      type: object
+      properties:
+        roleName: { type: string, description: "May not contain `#` or `/`." }
+        displayName: { type: string, maxLength: 128 }
+        roleArn: { type: string, pattern: "^arn:aws:iam::\\d{12}:role/.+" }
+        policyTier: { type: string }
+        description: { type: string }
+        color: { type: string, pattern: "^(#[0-9a-fA-F]{6})?$" }
+        icon: { type: string, enum: ["", view, admin, operate, deploy, data, billing, analytics, access] }
+        profileName: { $ref: "#/components/schemas/ProfileName" }
+        sessionDurationSeconds: { type: integer, minimum: 900, maximum: 43200 }
+      required: [roleName, roleArn]
+    RolePatch:
+      type: object
+      description: At least one field.
+      properties:
+        displayName: { type: string, maxLength: 128 }
+        roleArn: { type: string, pattern: "^arn:aws:iam::\\d{12}:role/.+" }
+        policyTier: { type: string }
+        description: { type: string }
+        color: { type: string, pattern: "^(#[0-9a-fA-F]{6})?$" }
+        icon: { type: string, enum: ["", view, admin, operate, deploy, data, billing, analytics, access] }
+        profileName: { $ref: "#/components/schemas/ProfileName" }
+        sessionDurationSeconds: { type: integer, minimum: 900, maximum: 43200 }
+    TestSessionResult:
+      type: object
+      properties:
+        ok: { type: boolean }
+        message: { type: string, description: STS's message when `ok` is false. }
+        expiration: { type: string, format: date-time }
+      required: [ok]
+
+    Grant:
+      type: object
+      properties:
+        userId: { type: string }
+        accountNumber: { $ref: "#/components/schemas/AccountNumber" }
+        roleName: { type: string }
+        expiresAt: { type: string, format: date-time, description: Absent = long-term. }
+      required: [userId, accountNumber, roleName]
+    Grantee:
+      type: object
+      properties:
+        userId: { type: string }
+        grantedBy: { type: string }
+        grantedAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+        direct: { type: boolean, description: Holds a direct grant row. }
+        viaGroup: { type: string, description: First group providing it when there is no direct grant. }
+        viaGroups: { type: array, items: { type: string }, description: Every group of theirs whose bundle holds it. }
+      required: [userId, direct, viaGroups]
+    UserGrant:
+      type: object
+      properties:
+        accountNumber: { $ref: "#/components/schemas/AccountNumber" }
+        roleName: { type: string }
+        grantedBy: { type: string }
+        grantedAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time, description: Effective expiry; absent when long-term or group-provided. }
+        viaGroup: { type: string }
+        viaGroups: { type: array, items: { type: string } }
+      required: [accountNumber, roleName]
+    BulkAssignResult:
+      type: object
+      properties:
+        userId: { type: string }
+        accountNumber: { $ref: "#/components/schemas/AccountNumber" }
+        roleName: { type: string }
+        status: { type: string, enum: [GRANTED, ALREADY_HAD, FAILED] }
+        message: { type: string }
+      required: [userId, accountNumber, roleName, status]
+    BulkRevokeResult:
+      type: object
+      properties:
+        userId: { type: string }
+        accountNumber: { $ref: "#/components/schemas/AccountNumber" }
+        roleName: { type: string }
+        status: { type: string, enum: [REVOKED, SKIPPED, FAILED] }
+        message: { type: string }
+      required: [userId, accountNumber, roleName, status]
+
+    User:
+      type: object
+      properties:
+        userId: { type: string, description: "Cognito `sub` — the stable id grants are keyed by." }
+        email: { type: string }
+        admin: { type: boolean }
+        pendingInvite: { type: boolean, description: Invited and never signed in — still on the temporary password, and not seen through a federated sign-in either. }
+        lastSeenAt: { type: string, format: date-time }
+        claims:
+          type: object
+          additionalProperties: { type: string }
+          description: "Federated claims on the user, keyed by the config `claims` key (e.g. `gid`). Only when at least one is set."
+        roleCount: { type: integer, minimum: 0, description: "Every role the user holds; `roles` carries at most 50 of them in the listing." }
+        resourceCount: { type: integer, minimum: 0, description: "Every resource the user holds; `resources` carries at most 50 of them in the listing." }
+        roleNames: { type: array, items: { type: string }, description: "Distinct role names over every role held (listing only) — complete where `roles` is cut." }
+        groupNames: { type: array, items: { type: string }, description: Distinct team names over every role and resource held (listing only). }
+        roles:
+          type: array
+          items:
+            type: object
+            properties:
+              accountNumber: { $ref: "#/components/schemas/AccountNumber" }
+              roleName: { type: string }
+              direct: { type: boolean }
+              groups: { type: array, items: { type: string }, description: Names of the user's groups whose bundle also grants it. }
+            required: [accountNumber, roleName, direct, groups]
+        resources:
+          type: array
+          items:
+            type: object
+            properties:
+              resourceId: { type: string }
+              name: { type: string }
+              accountNumber: { $ref: "#/components/schemas/AccountNumber" }
+              direct: { type: boolean }
+              groups: { type: array, items: { type: string } }
+            required: [resourceId, name, direct, groups]
+      required: [userId, email, admin, pendingInvite, roles, resources]
+    BulkCreateResult:
+      type: object
+      properties:
+        email: { type: string }
+        status: { type: string, enum: [CREATED, FAILED] }
+        userId: { type: string }
+        signupLink: { type: string, description: "On CREATED rows when `sendEmail` was `false`." }
+        message: { type: string }
+      required: [email, status]
+    BulkDeleteResult:
+      type: object
+      properties:
+        userId: { type: string }
+        status: { type: string, enum: [DELETED, FAILED] }
+        message: { type: string }
+      required: [userId, status]
+
+    ServiceUser:
+      type: object
+      properties:
+        clientId: { type: string }
+        name: { type: string }
+        createdAt: { type: string, format: date-time }
+        createdBy: { type: string }
+        lastUsedAt: { type: string, format: date-time }
+        secretCreatedAt: { type: string, format: date-time }
+        reviewedAt: { type: string, format: date-time }
+        roles: { type: array, items: { $ref: "#/components/schemas/UserGrant" } }
+        previous:
+          type: object
+          description: Mid-rotation — the replaced client that still works.
+          properties:
+            clientId: { type: string }
+            rotatedAt: { type: string, format: date-time }
+            lastUsedAt: { type: string, format: date-time }
+          required: [clientId]
+      required: [clientId, name, createdAt, createdBy, roles]
+    ServiceUserWithSecret:
+      type: object
+      properties:
+        serviceUser: { $ref: "#/components/schemas/ServiceUser" }
+        clientSecret: { type: string, description: Returned exactly once. }
+      required: [serviceUser, clientSecret]
+
+    GroupInput:
+      type: object
+      properties:
+        name: { type: string, minLength: 1, maxLength: 64 }
+        description: { type: string, maxLength: 500 }
+        roles: { type: array, items: { $ref: "#/components/schemas/RoleRef" } }
+        resources: { type: array, items: { type: string }, description: Resource ids. }
+    Group:
+      type: object
+      properties:
+        groupId: { type: string }
+        name: { type: string }
+        description: { type: string }
+        roles: { type: array, items: { $ref: "#/components/schemas/RoleRef" }, description: "In the list, at most 50 of them; `roleCount` is the total and GET /admin/groups/{groupId} carries all." }
+        roleCount: { type: integer, minimum: 0 }
+        resources: { type: array, items: { type: string }, description: Resource ids. }
+        plugins:
+          type: array
+          description: Plugin permissions in the bundle.
+          items:
+            type: object
+            properties:
+              pluginId: { type: string }
+              accountNumber: { $ref: "#/components/schemas/AccountNumber" }
+              permission: { type: string, enum: [user, admin] }
+            required: [pluginId, accountNumber, permission]
+        members: { type: array, items: { type: string }, description: Cognito subs, sorted. }
+        createdAt: { type: string, format: date-time }
+        createdBy: { type: string }
+      required: [groupId, name, roles, resources, plugins, members, createdAt, createdBy]
+    GroupView:
+      type: object
+      properties:
+        groupId: { type: string }
+        name: { type: string }
+        description: { type: string }
+        roles: { type: array, items: { $ref: "#/components/schemas/RoleRef" } }
+        resources:
+          type: array
+          items:
+            type: object
+            properties:
+              resourceId: { type: string }
+              name: { type: string }
+            required: [resourceId, name]
+        members:
+          type: array
+          items:
+            type: object
+            properties:
+              userId: { type: string }
+              email: { type: string }
+            required: [userId, email]
+        createdAt: { type: string, format: date-time }
+        createdBy: { type: string }
+      required: [groupId, name, roles, resources, members, createdAt, createdBy]
+    GroupEnvelope:
+      type: object
+      properties:
+        group: { $ref: "#/components/schemas/Group" }
+      required: [group]
+    GroupRolesBulkResult:
+      type: object
+      properties:
+        matched: { type: integer, description: Accounts matching the filter that have the role. }
+        added: { type: integer, description: Rows written (absent on a dry run). }
+        skipped: { type: integer, description: Matches already in the bundle (absent on a dry run). }
+        remaining: { type: integer, description: "Matches not yet written: one call writes at most 500, call again until this is 0 (absent on a dry run)." }
+        group: { $ref: "#/components/schemas/Group" }
+      required: [matched]
+
+    Resource:
+      type: object
+      properties:
+        resourceId: { type: string }
+        accountNumber: { $ref: "#/components/schemas/AccountNumber" }
+        name: { type: string }
+        type: { $ref: "#/components/schemas/ResourceType" }
+        cidr: { type: string, description: "Always `a.b.c.d/nn` with 24 ≤ nn ≤ 32." }
+        ports: { type: array, items: { type: integer } }
+        dnsName: { type: string, description: Connect name shown to users; the reconciler re-resolves it each pass. }
+        sshUser: { type: string }
+        securityGroupId: { type: string, description: When set, the reconciler keeps a connector ingress rule in it. }
+        description: { type: string }
+        createdAt: { type: string, format: date-time }
+        createdBy: { type: string }
+      required: [resourceId, accountNumber, name, type, cidr, ports, createdAt, createdBy]
+    ResourceCreate:
+      type: object
+      properties:
+        accountNumber: { $ref: "#/components/schemas/AccountNumber" }
+        name: { type: string }
+        type: { $ref: "#/components/schemas/ResourceType" }
+        cidr: { type: string, description: Bare IPv4 or /16–/32 CIDR. }
+        ports: { type: array, items: { type: integer, minimum: 1, maximum: 65535 }, minItems: 1 }
+        dnsName: { type: string }
+        sshUser: { type: string }
+        securityGroupId: { type: string }
+        description: { type: string }
+      required: [accountNumber, name, type, cidr, ports]
+    ResourcePatch:
+      type: object
+      description: At least one field.
+      properties:
+        name: { type: string }
+        type: { $ref: "#/components/schemas/ResourceType" }
+        cidr: { type: string }
+        ports: { type: array, items: { type: integer, minimum: 1, maximum: 65535 }, minItems: 1 }
+        dnsName: { type: string }
+        sshUser: { type: string }
+        securityGroupId: { type: string }
+        description: { type: string }
+    ResourceEnvelope:
+      type: object
+      properties:
+        resource: { $ref: "#/components/schemas/Resource" }
+      required: [resource]
+    ResourceGrantee:
+      type: object
+      properties:
+        userId: { type: string }
+        email: { type: string }
+        grantedBy: { type: string }
+        grantedAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+        direct: { type: boolean }
+        viaGroup: { type: string }
+        viaGroups: { type: array, items: { type: string } }
+      required: [userId, email, direct, viaGroups]
+    UserResourceGrant:
+      type: object
+      properties:
+        resourceId: { type: string }
+        grantedBy: { type: string }
+        grantedAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+        viaGroup: { type: string }
+        viaGroups: { type: array, items: { type: string } }
+      required: [resourceId]
+    UserResourceGrantNamed:
+      allOf:
+        - $ref: "#/components/schemas/UserResourceGrant"
+        - type: object
+          properties:
+            resourceName: { type: string }
+          required: [resourceName]
+
+    ReconcilerStatus:
+      type: object
+      properties:
+        at: { type: [string, "null"], format: date-time, description: Oldest site pass; `null` = never ran. }
+        resources:
+          type: object
+          description: Keyed by resourceId.
+          additionalProperties:
+            type: object
+            properties:
+              status: { type: string }
+              users: { type: integer }
+              sg: { type: string, description: "SG-manager verdict for the resource's security group: ok, not-found, invalid, error, other-vpc (the group is in none of the account's connector VPCs), sg-sync-failed." }
+              sgId: { type: string }
+              addr: { type: string, enum: [dns, dns-stale] }
+              addrIp: { type: string }
+              addrName: { type: string }
+            required: [status]
+        staleConnectors: { type: array, items: { type: string } }
+        resourcesLive: { type: integer }
+        rules: { type: integer }
+        shares:
+          type: object
+          description: Dev shares keyed by shareId — `live` (users = enrolled grantees named) or why not (`owner-not-enrolled`, `no-grantees`, `no-enrolled-grantees`, `invalid-port`).
+          additionalProperties:
+            type: object
+            properties:
+              status: { type: string }
+              users: { type: integer }
+            required: [status]
+        sharesLive: { type: integer }
+        sites:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              at: { type: [string, "null"], format: date-time }
+              staleConnectors: { type: array, items: { type: string } }
+              resourcesLive: { type: integer }
+              rules: { type: integer }
+              sharesLive: { type: integer }
+            required: [at, staleConnectors, resourcesLive, rules]
+        connectors:
+          type: array
+          items:
+            type: object
+            properties:
+              siteId: { type: string }
+              account: { type: string }
+              name: { type: string }
+              vpcName: { type: string, description: Which of the account's connector VPCs (its config name); absent = the unnamed one. }
+              nodeId: { type: string }
+              trusted: { type: boolean }
+              online: { type: boolean }
+              lastSeen: { type: string, format: date-time }
+              advertisedRoutes: { type: array, items: { type: string } }
+              approvedRoutes: { type: array, items: { type: string } }
+            required: [siteId, account, name, trusted, online, advertisedRoutes, approvedRoutes]
+        devices:
+          type: object
+          description: Keyed by user sub.
+          additionalProperties:
+            type: object
+            properties:
+              count: { type: integer }
+              online: { type: boolean }
+              lastSeen: { type: string, format: date-time }
+              sites: { type: array, items: { type: string } }
+            required: [count, online, sites]
+      required: [at, resources, staleConnectors, resourcesLive, rules, connectors, devices]
+
+    ActivityActor:
+      type: object
+      properties:
+        kind: { type: string, enum: [user, service, system] }
+        id: { type: string, description: Cognito sub, app client id, or `system:<job>`. }
+        name: { type: string, description: The live directory name when the caller still exists, else the write-time snapshot. }
+        claims:
+          type: object
+          additionalProperties: { type: string }
+        deleted: { type: boolean, description: Present when the caller is no longer in the directory. }
+      required: [kind, id]
+    ActivitySubject:
+      type: object
+      properties:
+        kind: { type: string, enum: [user, group, serviceUser] }
+        id: { type: string }
+        name: { type: string }
+        deleted: { type: boolean }
+      required: [kind, id]
+    ActivityEventView:
+      type: object
+      description: One recorded action. `action` is `object.verb` (role.grant, request.approve, credentials.vend, vpn.connect, admin.access, …); `outcome` says whether it happened.
+      properties:
+        eventId: { type: string }
+        category: { type: string, enum: [access, request, vend, network, catalog, users, auth] }
+        action: { type: string }
+        outcome: { type: string, enum: [OK, DENIED, FAILED] }
+        reason: { type: string, description: Caller-safe cause on DENIED and FAILED rows. }
+        actor: { $ref: "#/components/schemas/ActivityActor" }
+        subject: { $ref: "#/components/schemas/ActivitySubject" }
+        target: { type: string, description: "`role#<account>#<name>`, `resource#<id>`, `plugin#<id>#<account>#<permission>`, `share#<id>`, `group#<id>`, `user#<sub>`, `serviceuser#<id>`, `account#<n>`, `site#<id>`, `sg#<id>`, `route#<METHOD /path>`." }
+        targetName: { type: string }
+        accountNumber: { $ref: "#/components/schemas/AccountNumber" }
+        details:
+          type: object
+          description: expiresAt, durationHours, note, via (ADMIN | GROUP | REAPPROVAL | CASCADE | OWNER | EXPIRY), groupId, requestId, batchId, changed (key → {from, to}), affected (up to 50 {userId, name, change}) + affectedCount, deniedReason, and action-specific keys.
+          additionalProperties: true
+        derived: { type: boolean, description: A per-user effective-access change the access diff wrote (access.gain / access.lose), linked to its batch's primary row. }
+        at: { type: string, format: date-time }
+        day: { type: string, description: UTC calendar day `YYYY-MM-DD`. }
+      required: [eventId, category, action, outcome, actor, at, day]
+    ActivityPage:
+      type: object
+      properties:
+        events:
+          type: array
+          items: { $ref: "#/components/schemas/ActivityEventView" }
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        nextBefore: { type: string, format: date-time, description: Present when the page filled up — pass as `before` (with `skip`) to continue. }
+      required: [events, from, to]

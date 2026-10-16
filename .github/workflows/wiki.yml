@@ -1,0 +1,52 @@
+# Mirrors wiki/ into the GitHub wiki (a separate git repo GitHub hosts at
+# <repo>.wiki.git). The wiki must exist first: create its first page once in
+# the Wiki tab, otherwise the clone fails with "Repository not found".
+# Pages edited in the wiki web UI are overwritten by the next sync.
+name: Wiki
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - wiki/**
+      - .github/workflows/wiki.yml
+      - .github/scripts/check-wiki-links.mjs
+  workflow_dispatch:
+
+concurrency:
+  group: wiki
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Check links and anchors
+        run: node .github/scripts/check-wiki-links.mjs
+
+      - name: Clone the wiki
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          git clone "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git" "$RUNNER_TEMP/wiki" \
+            || { echo "::error::Wiki repo not found. Enable Wikis in Settings and create the first page in the Wiki tab, then re-run."; exit 1; }
+
+      - name: Mirror wiki/ into it
+        run: |
+          rsync -a --delete --exclude .git wiki/ "$RUNNER_TEMP/wiki/"
+          cd "$RUNNER_TEMP/wiki"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          if git diff --cached --quiet; then echo 'wiki already up to date'; exit 0; fi
+          git commit -m "Sync from ${GITHUB_REPOSITORY}@${GITHUB_SHA::7}"
+          git push

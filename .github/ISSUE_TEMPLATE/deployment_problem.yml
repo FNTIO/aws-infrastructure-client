@@ -1,0 +1,78 @@
+name: Deployment / setup problem
+description: Your own deployment of @fntio/infra-client fails to deploy, upgrade, or run
+labels: ["type: deployment", "status: needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing, compare against [Deploy and Upgrade](https://github.com/FNTIO/aws-infrastructure-client/wiki/Deploy-and-Upgrade) and the consumer section of [Troubleshooting](https://github.com/FNTIO/aws-infrastructure-client/wiki/Troubleshooting).
+        Do not paste secrets, API keys, or credentials. AWS account ids are fine.
+  - type: input
+    id: version
+    attributes:
+      label: Package version
+      description: The `@fntio/infra-client` version in your deployment's package.json. For an upgrade, give both.
+      placeholder: "0.1.9 → 0.1.10"
+    validations:
+      required: true
+  - type: dropdown
+    id: activity
+    attributes:
+      label: What were you doing
+      options:
+        - First deploy
+        - Upgrade from a previous version
+        - Adding a workload account (TargetAccountStack)
+        - Joining a VPC to the VPN
+        - Day-to-day operation (deployed fine, then broke)
+        - Tear down
+    validations:
+      required: true
+  - type: dropdown
+    id: stack
+    attributes:
+      label: Stack
+      description: The stack that failed, if the failure is a stack failure.
+      options:
+        - DataStack
+        - CredsStack
+        - WebStack
+        - WebCertStack
+        - TargetAccountStack (workload account)
+        - NetworkStack
+        - ConnectorStack
+        - Not a stack failure / not sure
+    validations:
+      required: true
+  - type: textarea
+    id: error
+    attributes:
+      label: Error output
+      description: The CloudFormation event, `cdk deploy` output, or CloudWatch log lines that show the failure.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Config block involved
+      description: The relevant slice of your ProjectConfig, with secrets removed.
+      render: typescript
+  - type: input
+    id: regions
+    attributes:
+      label: Regions
+      description: Hub region, plus us-east-1 details if WebCertStack is involved.
+      placeholder: "eu-central-1 hub, us-east-1 certs"
+  - type: textarea
+    id: tried
+    attributes:
+      label: What you already tried
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I ran cdk from a clean tree with the frontend built (or I am using the packaged tarball)
+        - label: This report contains no secrets, API keys, or credentials
+          required: true
