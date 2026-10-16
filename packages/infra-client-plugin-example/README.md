@@ -38,23 +38,26 @@ plugins: { enabled: true },
 
 ### 2. Get the plugin packages
 
-They are not on npm yet. Every [GitHub Release](https://github.com/FNTIO/aws-infrastructure-client/releases)
-from v0.1.18 on carries them beside the core tarball: download the four plugin `.tgz` files from the
-Release your portal runs and install them next to your `@fntio/infra-client` one. The four plugin
-packages share one version (0.2.0 today) and release together.
+The four plugin packages (`-sdk`, `-cdk`, `-ui`, `-example`) are on npm under `@fntio`; they
+share one version (0.2.0 today) and release together.
 
 ```bash
-cd <your cdk project> && mkdir -p vendor
+cd <your cdk project>
+npm install @fntio/infra-client-plugin-sdk @fntio/infra-client-plugin-cdk @fntio/infra-client-plugin-ui
+```
+
+Deployments that vendor instead: every [GitHub Release](https://github.com/FNTIO/aws-infrastructure-client/releases)
+carries the same four tarballs beside the core one. Download them from the Release your portal
+runs and depend on them with `file:` specs, like the core tarball.
+
+```bash
+mkdir -p vendor
 gh release download v<version your portal runs> --repo FNTIO/aws-infrastructure-client \
   --pattern 'fntio-infra-client-plugin-*.tgz' --dir vendor
 ```
 
-Older Release, or no download access? Build the same files from the source at that tag:
-`git clone https://github.com/FNTIO/aws-infrastructure-client && git checkout v<version> && npm ci && npm run pack:plugins`
-writes them into `packs/`.
-
 ```jsonc
-// package.json of your CDK project
+// package.json of your CDK project, vendored
 "dependencies": {
   "@fntio/infra-client":            "file:vendor/fntio-infra-client-<version>.tgz",
   "@fntio/infra-client-plugin-sdk": "file:vendor/fntio-infra-client-plugin-sdk-0.2.0.tgz",
@@ -63,9 +66,9 @@ writes them into `packs/`.
 }
 ```
 
-**Optional, recommended:** also install `fntio-infra-client-plugin-example-0.2.0.tgz` and register
-this example first. It is a finished, working plugin, so it proves your deploy, the grants and the
-iframe before you write a line. Its tarball carries the built frontend and a prebundled Lambda, so
+**Optional, recommended:** also install `@fntio/infra-client-plugin-example` and register this
+example first. It is a finished, working plugin, so it proves your deploy, the grants and the
+iframe before you write a line. The package carries the built frontend and a prebundled Lambda, so
 your synth runs no bundler and needs no Docker.
 
 ```ts
@@ -77,13 +80,20 @@ addAccessPortal(app, {
   resourcePrefix: RESOURCE_PREFIX,
   plugins: [
     parametersPlugin({
-      accountNumber: "111111111111",
-      region: "eu-central-1",
+      accountNumber: "111111111111",   // the hub account: see "Which account" below
+      region: "eu-central-1",          // optional; defaults to the stack's region
       prefixes: ["/myapp/prod"],
     }),
   ],
 });
 ```
+
+**Which account.** In v1 the handler runs with the hub Lambda's own credentials, so `accountNumber`
+must be the hub account, the one the portal is deployed in: the IAM policy names that account's
+parameters, and a workload account's would be unreachable. To serve another account, add an
+assume-role of your own: a role in that account that trusts the function's role, `sts:AssumeRole`
+on the function, and an SSM client built from the assumed credentials. The portal's cross-account
+trust is for role vending, not for plugin Lambdas.
 
 ### 3. Write the registration
 
@@ -322,8 +332,15 @@ also writes them, behind an explicit confirmation. Nothing else is reachable:
 - **One instance serves one account.** The portal authorizes a request for a particular account; if
   that is not the account this instance was registered for, it answers 409 rather than quietly
   serving its own. Two accounts means two registrations, each with its own function and policy.
+- **One region, too.** `region` (default: the stack's) reaches the handler as `PLUGIN_REGION`, pins
+  its SSM client, scopes the IAM ARNs to that region and account, and is the manifest's `regions`
+  binding when given.
 - **Encrypted values stay encrypted.** A `SecureString` is fetched without decryption and returned as
-  metadata only, so a viewer sees that a secret exists without seeing it.
+  metadata only, so a viewer sees that a secret exists without seeing it. Writing one is refused
+  server-side with 409, not only hidden in the UI: this sample never decrypts and never writes a
+  secret. `kmsKeyArn` adds `kms:Decrypt` for that one key, for a copy that deliberately reads
+  SecureStrings (`WithDecryption: true` in its own store); the example itself never asks.
+- **Values are bounded.** Over 4 KB (the SSM standard-tier limit) is a 400 before any call.
 - **Values never reach a log.** The logger records that a parameter changed and its new version.
 
 ### Develop

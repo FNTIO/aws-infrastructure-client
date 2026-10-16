@@ -58,6 +58,38 @@ Symptom-first answers for the failures seen so far: issues reported from consume
 - Cause: a WAF rule. A 429 is one of the two rate rules (`RateLimit` per IP, `TokenRateLimit` per bearer token); a 403 is a managed rule.
 - Fix: read the `aws-waf-logs-<prefix>-web` log group (us-east-1) first, then `-api`; the log line names the rule. Raise `waf.rateLimit` or `waf.perTokenRateLimit` only for a legitimately large client. See [What deploys (default on)](Security-Posture#what-deploys-default-on).
 
+## Plugins
+
+### A plugin route answers 403 with reason `route-unknown` during a deploy
+
+- Symptom: calls to a route the running deploy adds return 403, and the authorizer's log line says `route-unknown`; routes that existed before keep working.
+- Cause: the gateway method goes live before the catalog record that names it; the activation resource is written after the methods.
+- Fix: wait for the deploy to finish. Ship the UI that calls a new route in the same deploy as the route, never ahead of it. See [Troubleshooting](https://github.com/FNTIO/aws-infrastructure-client/blob/main/packages/infra-client/README.md#troubleshooting) under Plugins in the package README.
+
+### Plugin assets answer 403
+
+- Symptom: the plugin page or one of its files answers 403 under `/plugin-assets/…`, and the portal reports the page never connected.
+- Cause: the assets path is CloudFront over a private bucket with a GetObject-only policy and no SPA rewrite, so a missing key answers 403, never `index.html`. The object key must equal the URL path; the usual cause is a plugin registered with its frontend not built, or an `entry` naming a file outside the built directory.
+- Fix: build the plugin frontend before synth, check `entry`, redeploy. See [Troubleshooting](https://github.com/FNTIO/aws-infrastructure-client/blob/main/packages/infra-client/README.md#troubleshooting) in the package README.
+
+### "This plugin was built for a different version of the portal"
+
+- Symptom: a plugin page shows this notice instead of loading.
+- Cause: the frame and the portal speak different message protocol versions (a page built on the 0.1.x plugin packages against a 0.2.0 or later portal, or the reverse).
+- Fix: rebuild the plugin against the plugin packages of the installed package version and redeploy. See [Versioning](https://github.com/FNTIO/aws-infrastructure-client/blob/main/packages/infra-client-plugin-sdk/README.md#versioning) in the SDK README and the 0.2.0 note on [[Deploy and Upgrade]].
+
+### "Its page loaded but never connected to the portal"
+
+- Symptom: the frame stays blank or renders, then the portal reports a handshake timeout.
+- Cause: the page never posted `ready`: the `entry` path names the wrong file, or the Content-Security-Policy on plugin assets blocked a script the page needs — that policy allows the portal only, so a bundle loading anything from a third-party host never runs.
+- Fix: open the frame URL in a tab and read the console for CSP violations; bundle every dependency; correct the entry. See [Browser SDK](https://github.com/FNTIO/aws-infrastructure-client/blob/main/packages/infra-client-plugin-sdk/README.md#browser-sdk) in the SDK README and [Troubleshooting](https://github.com/FNTIO/aws-infrastructure-client/blob/main/packages/infra-client/README.md#troubleshooting) in the package README.
+
+### Token refresh fails inside a plugin frame
+
+- Symptom: a plugin request fails with 401 and the plugin shows an error, or the frame gives way to the portal's session-ended page.
+- Cause: the host owns the session; the SDK never signs in itself. After an authentication-layer 401 it asks the host to renew and retries exactly once; after that the plugin surfaces the error and the portal's session-end flow applies (the 12 h wall). A plugin Lambda answering 401 for a business failure triggers the same retry.
+- Fix: sign in again. Plugin authors answer domain 4xx codes, never 401. See [Browser SDK](https://github.com/FNTIO/aws-infrastructure-client/blob/main/packages/infra-client-plugin-sdk/README.md#browser-sdk) in the SDK README and [Troubleshooting](https://github.com/FNTIO/aws-infrastructure-client/blob/main/packages/infra-client/README.md#troubleshooting) in the package README.
+
 ## Desktop app
 
 ### App still shows old web code after a frontend deploy

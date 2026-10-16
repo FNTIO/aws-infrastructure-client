@@ -5,7 +5,7 @@
 openapi: 3.1.0
 info:
   title: Infra Client API
-  version: 0.4.0
+  version: 0.5.0
   summary: Self-hosted AWS access portal — credential vending, access requests, admin catalog, private-network resources.
   description: |
     One Express app behind CloudFront (`/api/*`) and API Gateway (no prefix).
@@ -2052,6 +2052,8 @@ paths:
         Idempotent and race-free: the row is written only if absent, so a retry or two concurrent adds leave one row,
         and a role already in the bundle answers `200` with nothing changed, noticed or logged. Members who gain the
         role are noticed, as with a `PATCH`. Prefer this over `PATCH` with the full role list for large groups.
+        Answers with the change, not the bundle (a 4,000-role group answers in well under a second); read the bundle
+        with `GET /admin/groups/{groupId}` or page it with `GET …/roles`.
       parameters:
         - $ref: "#/components/parameters/groupId"
       requestBody:
@@ -2065,12 +2067,12 @@ paths:
           description: The role was added.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/GroupEnvelope" }
+              schema: { $ref: "#/components/schemas/GroupRoleChange" }
         "200":
           description: The role was already in the bundle; nothing changed.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/GroupEnvelope" }
+              schema: { $ref: "#/components/schemas/GroupRoleChange" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -2736,6 +2738,44 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "502": { $ref: "#/components/responses/Upstream" }
 
+  /plugins/expiry:
+    get:
+      tags: [Plugins]
+      summary: My plugin expiry notices
+      operationId: listPluginExpiryNotices
+      description: Temporary plugin permissions nearing / past their end, named for the bell (a removed plugin keeps its label; an account without a name shows its number).
+      responses:
+        "200":
+          description: Soonest expiry first; most recently expired first.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  expiring:
+                    type: array
+                    items: { $ref: "#/components/schemas/PluginExpiryNotice" }
+                  expired:
+                    type: array
+                    items: { $ref: "#/components/schemas/PluginExpiryNotice" }
+                required: [expiring, expired]
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /plugins/expiry/seen:
+    post:
+      tags: [Plugins]
+      summary: Acknowledge plugin expiry notices
+      operationId: markPluginExpiryNoticesSeen
+      responses:
+        "200":
+          description: How many notices were newly marked seen.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Cleared" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
   /admin/plugins:
     get:
       tags: ["Admin: plugins"]
@@ -2839,8 +2879,9 @@ paths:
       operationId: adminAssignPlugin
       description: >-
         Idempotent; re-assigning rewrites the row (the extend path) and never downgrades a long-term grant to
-        a temporary one. Groups are standing, so an expiry on a group is refused. 409 when the plugin is
-        installed but the binding is unavailable (disabled, removed, unsupported, or an unregistered account).
+        a temporary one. Groups are standing, so an expiry on a group is refused. 404 for an unknown plugin,
+        group, or user (a person in the pool or a registered service user). 409 when the plugin is installed
+        but the binding is unavailable (disabled, removed, unsupported, or an unregistered account).
       parameters:
         - $ref: "#/components/parameters/pluginId"
         - $ref: "#/components/parameters/accountNumber"
@@ -3617,6 +3658,17 @@ components:
         accountName: { type: string }
         expiresAt: { type: string, format: date-time, description: Absent = long-term. }
       required: [resourceId, name, type, cidr, ports, accountNumber]
+    PluginExpiryNotice:
+      type: object
+      properties:
+        pluginId: { type: string }
+        accountNumber: { $ref: "#/components/schemas/AccountNumber" }
+        permission: { $ref: "#/components/schemas/PluginPermission" }
+        expiresAt: { type: string, format: date-time }
+        seen: { type: boolean }
+        pluginName: { type: string }
+        accountName: { type: string }
+      required: [pluginId, accountNumber, permission, expiresAt, seen, pluginName, accountName]
     ResourceExpiryNotice:
       type: object
       properties:
@@ -4013,6 +4065,15 @@ components:
       properties:
         group: { $ref: "#/components/schemas/Group" }
       required: [group]
+    GroupRoleChange:
+      type: object
+      description: One role in or out of a bundle — what changed, never the bundle itself.
+      properties:
+        groupId: { type: string }
+        name: { type: string }
+        role: { $ref: "#/components/schemas/GroupRoleRef" }
+        added: { type: boolean, description: "False when the role was already in the bundle." }
+      required: [groupId, name, role, added]
     GroupRolesBulkResult:
       type: object
       properties:

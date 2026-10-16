@@ -6,9 +6,9 @@ the messages a plugin iframe exchanges with the portal shell, and the context th
 shared authorizer hands a plugin Lambda. Types plus runtime validators, no runtime
 dependencies.
 
-Status: contracts (issue #19), the iframe SDK with its host adapter (issue #24) and the
-backend handler helpers (issue #22). Nothing here is published yet; the package is private
-until the publishing workflow enables it.
+Published to npm as `@fntio/infra-client-plugin-sdk`, beside `-cdk`, `-ui` and `-example`: the
+four plugin packages share one version, release together, and every GitHub Release carries their
+tarballs.
 
 ## Entry points
 
@@ -133,8 +133,10 @@ points.
 
 `createPluginHost` (entry `/host`) is the portal side. It validates `event.source` against
 the iframe's window and `event.origin` against the expected origin, answers `ready` with
-`init` built from `initialState()` (read each time, so a reloaded frame starts current),
-forwards `sendSession`/`sendAccess`/`sendTheme`, coalesces
+`init` built from `initialState()` (read each time, so a reloaded frame starts current; `init` and
+every `sessionChanged` carry exactly the documented fields — `pluginSessionOf` — so a state object
+that also holds a refresh token never crosses into the frame), forwards
+`sendSession`/`sendAccess`/`sendTheme`, coalesces
 `requestSessionRefresh` into one `refreshSession()` call and replies to each request id, and
 drops messages from a replaced instance. A `null`, rejecting or throwing renewal sends
 `sessionEnded(expired)` and ends the host. `onIncompatible` reports a frame on another protocol
@@ -173,8 +175,13 @@ const host = createDevHost({ frame, listenOn: window, origin: location.origin, e
 frame.src = "/plugin/index.html#/admin";
 // scenarios: host.renewSession(), host.expireSession(), host.failNextRefresh(),
 // host.revoke(n), host.grant(a), host.setEntryAvailable(false),
-// host.setAppearance("dark"), host.signOut()
+// host.setAppearance("dark"), host.signOut(), host.failLoad()
 ```
+
+`failLoad()` is the page that never loads — a wrong `entry`, an asset missing from the build, a
+frame sandboxed without `allow-same-origin` — reported as `handshakeTimeout` at once rather than
+after `handshakeTimeoutMs`, so a harness can exercise its own "this page did not load" state (the
+portal's `timeout` state) without waiting; a version mismatch is the separate `incompatible` event.
 
 Its defaults differ from the shipped portal on purpose, so a plugin can be exercised against
 states the portal does not produce today: the user is `dev-user` with an `email` and a
@@ -238,8 +245,24 @@ than carrying its own copy of it. The integration half — adding a finished plu
 that already exists — is `skills/integrate-infra-client-plugin/` in
 `@fntio/infra-client-plugin-cdk`.
 
-Make them available the way your agent setup already does: most read a `skills/` directory inside
-`node_modules`, or you can copy the folder into your own skills location. There is no installer.
+Each `SKILL.md` carries a `version` equal to the package version, so a copied skill can be checked
+against the installed package.
+
+### Making the skill available to your agent
+
+There is no installer. For Claude Code, link (or copy) the folder into the project's `.claude/skills/`
+and it appears as `/build-infra-client-plugin`:
+
+```bash
+mkdir -p .claude/skills
+ln -s ../../node_modules/@fntio/infra-client-plugin-sdk/skills/build-infra-client-plugin .claude/skills/build-infra-client-plugin
+# or, for a copy that survives `npm ci` and an agent that does not follow symlinks:
+cp -R node_modules/@fntio/infra-client-plugin-sdk/skills/build-infra-client-plugin .claude/skills/
+```
+
+For other agents, copy the same folder into wherever that agent reads skills or instructions from,
+or point it at the file directly. A copy goes stale when the package is upgraded; the `version`
+line in the frontmatter says which package it came from.
 
 ## Versioning
 
@@ -264,7 +287,7 @@ is the compatibility gate.
 
 The npm package follows semver. While it is `0.x`, an incompatible change bumps the
 minor version and one of the numbers above; a compatible addition bumps the patch
-version. The three plugin packages (`-sdk`, `-cdk`, `-ui`) release together at the
+version. The four plugin packages (`-sdk`, `-cdk`, `-ui`, `-example`) release together at the
 same version.
 
 ## Develop
@@ -275,6 +298,6 @@ npx tsc --noEmit && npm test
 ```
 
 Workspace installs run at the repository root (`npm install`), never here.
-`npm run build:plugins` at the root compiles `dist/` for all three plugin packages
+`npm run build:plugins` at the root compiles `dist/` for all four plugin packages
 in dependency order; the CDK and UI packages type-check and test against this
 package's `src/` directly, so no build is needed for day-to-day checks.

@@ -1,7 +1,8 @@
 # @fntio/infra-client-plugin-ui
 
 Theme helpers, the portal's component styles, and an HTTP interceptor for Angular plugins.
-Private until publishing is enabled.
+Published to npm as `@fntio/infra-client-plugin-ui`, at one version with `-sdk`, `-cdk` and
+`-example`.
 
 ## Theme
 
@@ -89,9 +90,12 @@ tokenised: place this interceptor after any base-URL-rewriting one. It needs onl
 (`PluginInterceptorContext`).
 
 The function is typed structurally against `HttpInterceptorFn`, so this entry depends on
-`rxjs` only and no Angular version is pinned by the package;
-`src/__tests__/angular-typecheck.ts` holds the shape to the real Angular type at
-`tsc --noEmit` time.
+`rxjs` only and no Angular version is pinned by the package. That shape —
+`(req: HttpRequest<unknown>, next: HttpHandlerFn) => Observable<HttpEvent<unknown>>`, with
+`req.url`, `req.body` and `req.clone({ setHeaders })` — is the functional interceptor Angular
+introduced in 15 and has kept unchanged through 20, so those majors (15 to 20) are supported;
+`src/__tests__/angular-typecheck.ts` holds the shape to the real type of the Angular this
+repository pins (20) at `tsc --noEmit` time, and a test keeps every Angular import out of `src/`.
 
 ## Develop
 

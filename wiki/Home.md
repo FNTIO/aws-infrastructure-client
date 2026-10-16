@@ -25,7 +25,7 @@
 | This wiki | Orientation pages, kept short, linking to the sources below |
 | [Package README](https://github.com/FNTIO/aws-infrastructure-client/blob/main/packages/infra-client/README.md) | The consumer reference: tarball contents, config file, app file, deploy and upgrade steps. Ships inside the package |
 | [[User Guide]], [[Admin Guide]], [[API Integration]] | Using the portal as a developer, as an admin, and from another system |
-| [[Runbooks]] | Every operational runbook: users, service users, issuer, network, day-two operations |
+| [[Runbooks]] | Every operational runbook: users, service users, plugins, issuer, network, day-two operations |
 | [frontend/README.md](https://github.com/FNTIO/aws-infrastructure-client/blob/main/frontend/README.md), [desktop/README.md](https://github.com/FNTIO/aws-infrastructure-client/blob/main/desktop/README.md) | Engineering docs for the web app and the desktop client |
 
 ## How this wiki is maintained

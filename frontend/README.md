@@ -80,6 +80,14 @@ first-admin theme wizard auto-opens; the login setup step clicks
 server-side same as a human skipping. Save a real theme first if you
 don't want the default look.
 
+The plugin spec (`e2e/plugins.spec.ts`) assumes the deployment registers the
+reference plugin and the e2e admin holds `admin` on it DIRECTLY (not through a
+group): its access-loss test revokes that grant over the API, expects the open
+admin page to end, and regrants it in a `finally` — so for a few seconds the
+Parameters entry is gone from that user's sidebar, and the file runs its tests in
+order on one worker. Signing out revokes the refresh token server-side, so the
+sign-out test signs in on its own context instead of ending the shared session.
+
 Commands:
 
 ```bash

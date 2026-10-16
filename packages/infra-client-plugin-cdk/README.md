@@ -5,7 +5,8 @@ Registers customer plugins from an existing CDK application. This package holds
 gateway methods, upload the assets and write the catalog record (`resolvePlugins`,
 `PluginApi`, `PluginCatalogActivation`) live in `@fntio/infra-client` and run when the
 definition is passed to `addAccessPortal` — see the core README's
-[Plugins](../infra-client/README.md#plugins) section. Private until publishing is enabled.
+[Plugins](../infra-client/README.md#plugins) section. Published to npm as
+`@fntio/infra-client-plugin-cdk`, at one version with `-sdk`, `-ui` and `-example`.
 
 ## `definePlugin`
 
@@ -61,14 +62,72 @@ npx tsc --noEmit && npm test
 
 Type checks and tests resolve `@fntio/infra-client-plugin-sdk` to its `src/`
 (tsconfig `paths` + Jest `moduleNameMapper`); `npm run build` uses the SDK's built
-`dist/`, so run `npm run build:plugins` at the repository root to build all three.
+`dist/`, so run `npm run build:plugins` at the repository root to build all four.
 
 ## Agent skill
 
 `skills/integrate-infra-client-plugin/` ships with this package: it inspects an existing CDK
 application's own conventions — where the portal is composed, how Lambdas are built, how it deploys —
-and makes the smallest correct change, then diffs it. Make it available the way your agent setup
-already does; there is no installer and no generated project.
+and makes the smallest correct change, then diffs it. Its frontmatter `version` equals the package
+version. There is no installer and no generated project: for Claude Code, link or copy the folder
+into the project's `.claude/skills/`; for other agents, copy it to wherever they read skills from.
+
+```bash
+mkdir -p .claude/skills
+ln -s ../../node_modules/@fntio/infra-client-plugin-cdk/skills/integrate-infra-client-plugin .claude/skills/integrate-infra-client-plugin
+# or copy: cp -R node_modules/@fntio/infra-client-plugin-cdk/skills/integrate-infra-client-plugin .claude/skills/
+```
+
+## IAM examples
+
+IAM is the customer's configuration: the portal decides who may call a route, the handler's policy
+decides what the code may touch, and `definePlugin` adds nothing to it. Three shapes that come up,
+with placeholders; scope every one to the resources the plugin exists for.
+
+**SSM path + KMS key** (the example plugin's policy, see
+[`@fntio/infra-client-plugin-example`](../infra-client-plugin-example/README.md)):
+
+```ts
+fn.addToRolePolicy(new iam.PolicyStatement({
+  actions: ["ssm:GetParameter", "ssm:GetParameters", "ssm:PutParameter"],
+  resources: [`arn:aws:ssm:${region}:${account}:parameter/myapp/prod/*`],
+}));
+fn.addToRolePolicy(new iam.PolicyStatement({
+  actions: ["ssm:GetParametersByPath"],
+  resources: [`arn:aws:ssm:${region}:${account}:parameter/myapp/prod`],
+}));
+// only if the handler decrypts SecureStrings, and only the key they use
+fn.addToRolePolicy(new iam.PolicyStatement({ actions: ["kms:Decrypt"], resources: [parameterKey.keyArn] }));
+```
+
+**A designated Step Functions workflow plus a plugin state table** (start and inspect one state
+machine; read and write one table):
+
+```ts
+workflow.grantStartExecution(fn);                                   // states:StartExecution on this ARN only
+fn.addToRolePolicy(new iam.PolicyStatement({
+  actions: ["states:DescribeExecution"],
+  resources: [`arn:aws:states:${region}:${account}:execution:${workflow.stateMachineName}:*`],
+}));
+jobsTable.grantReadWriteData(fn);                                    // dynamodb on this table (and its indexes) only
+```
+
+**RDS snapshot and restore on named or tagged instances:**
+
+```ts
+fn.addToRolePolicy(new iam.PolicyStatement({
+  actions: ["rds:CreateDBSnapshot", "rds:DescribeDBSnapshots", "rds:RestoreDBInstanceFromDBSnapshot"],
+  resources: [
+    `arn:aws:rds:${region}:${account}:db:myapp-*`,
+    `arn:aws:rds:${region}:${account}:snapshot:myapp-*`,
+  ],
+  conditions: { StringEquals: { "aws:ResourceTag/plugin": "backups" } },   // or drop the condition and rely on the names
+}));
+```
+
+`region` and `account` are `Stack.of(scope).region` / `.account` or the values the registration was
+given; the handler runs in the hub account with the function's own credentials, so another account
+needs an assume-role of the customer's own.
 
 ## The lifecycle in one place
 

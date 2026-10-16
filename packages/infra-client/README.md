@@ -759,6 +759,41 @@ tarball install keeps working with no second package to fetch. A
 plugin author's own code imports the SDK directly, so they install the plugin
 tarballs too: every GitHub Release from v0.1.18 carries them beside this one.
 
+### Troubleshooting
+
+Five failures seen so far, each with its cause and the fix.
+
+- **A route answers 403 with `context.reason` `route-unknown` while a deploy
+  runs.** The gateway method goes live before the catalog record that names
+  it (the activation resource depends on the methods, so it is written last).
+  Wait for the deploy to finish; ship the UI that calls a new route in the
+  same deploy as the route, never ahead of it.
+- **Plugin assets answer 403.** `/plugin-assets/*` is CloudFront over the
+  private assets bucket with a GetObject-only policy and no SPA rewrite, so a
+  key that does not exist answers 403 — a real error, never `index.html`. The
+  object key must equal the URL path: the usual cause is a plugin registered
+  with its frontend not built (an empty or stale `ui.assets` directory) or an
+  `entry` that names a file outside it. Build the frontend before synth and
+  redeploy.
+- **"This plugin was built for a different version of the portal."** The
+  frame speaks another message protocol version than the installed portal
+  (0.1.x pages against a 0.2.0 portal, or the reverse). Rebuild the plugin
+  against the plugin packages of the installed `@fntio/infra-client` version
+  and redeploy; see the SDK README's Versioning section.
+- **"Its page loaded but never connected to the portal"** (the handshake
+  timeout). The page never posted `ready`: the `entry` path names the wrong
+  file, or the plugin-assets Content-Security-Policy blocked a script the
+  page needs — that policy allows the portal only, so a bundle that loads
+  anything from a third-party host never runs. Open the frame URL in a tab
+  and read the console for CSP violations; bundle every dependency.
+- **Token refresh fails inside a frame.** The host owns the session; the
+  SDK never signs in itself. After an authentication-layer 401 it asks the
+  host to renew and retries exactly once; if that fails, the plugin surfaces
+  the error and the portal's own session-end flow applies (`sessionEnded`
+  with reason `expired` at the 12 h wall). A plugin Lambda that answers 401
+  for a business failure triggers the same retry, so answer domain 4xx codes
+  instead.
+
 ## Plugin permissions
 
 Customer plugins (Epic 5) hold their grants in the same Access table as roles,
