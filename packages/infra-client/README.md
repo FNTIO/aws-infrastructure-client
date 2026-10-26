@@ -243,6 +243,16 @@ export const PROJECT: ProjectConfig = {
   // leaked token, sized above the product's own bulk bursts.
   waf: { enabled: true, rateLimit: 5000, perTokenRateLimit: 2000 },
 
+  // Optional. The vending API's stage throttle: requests per second across
+  // EVERY caller (the per-token ceiling is waf.perTokenRateLimit). One page
+  // load is 10–15 calls — size for everyone opening the portal at once.
+  apiThrottle: { rateLimit: 100, burstLimit: 200 },
+
+  // Optional. How every user's dashboard is laid out: "auto" (default) gives a
+  // user the Main / Favorites / Recent sections once they hold an account an
+  // admin took off the Main section; "sections" or "plain" for everyone.
+  dashboard: { layout: "auto" },
+
   // Optional. How long the activity log keeps each row (30–3650 days).
   // Default 400, which outlasts the yearly access review.
   audit: { retentionDays: 400 },
@@ -637,6 +647,39 @@ Everything else is ordinary CDK. `TargetRoleSpec.maxSessionDuration` defaults
 to 12 hours; the per-role session length an admin sets in the portal is the
 effective limit.
 
+## Personal access tokens
+
+With `personalAccessTokens: { enabled: true }` every user can create tokens for scripts, CI jobs,
+command-line tools and remote development machines that act as them. The bearer token is
+`icpat_<tokenId>_<secret>`; the prefix lets secret scanners recognise a leaked one. The portal
+stores only the SHA-256 of the secret (the `TokensTable` in `DataStack`, always present so the
+switch never moves an export) and shows the secret once, at creation.
+
+- **Scopes.** `aws` lists the owner's accounts and roles and vends credentials (`GET /accounts`,
+  `POST /credentials`, console links); `network` enrolls the owner's own devices (`POST
+  /network/device-key`, optionally `ephemeral`) and lists or removes them (`GET /network/devices`,
+  `DELETE /network/devices/{site}/{name}`); `shares` creates, lists and stops dev shares; `api` is
+  every route the owner may call, admin routes included only while the owner is an admin. The
+  table of which scope reaches which route is `lambdacode/api/services/tokenScopes.ts`; anything
+  else answers `403` with `code: "TOKEN_SCOPE"`.
+- **Acts as its owner.** A request with a token sees the owner's current effective access (a lost
+  grant is lost for the token at once), narrowed in `access.ts` to the token's optional role subset
+  (`roles`, for `aws` and `api`). Admin status and the owner's account status are read from the
+  directory, cached for a minute, never from the token; a disabled or deleted owner's tokens stop
+  working, and deleting a user deletes their tokens.
+- **Never self-perpetuating.** No token can create, list or revoke tokens (`/tokens`,
+  `/admin/tokens`); that needs a signed-in session. `GET /tokens/current` answers any token with
+  who it acts as. Plugin routes refuse tokens (the plugin authorizer has no token table).
+- **Lifetime.** Every token expires; `personalAccessTokens.maxLifetimeDays` caps it (default 90,
+  1–365). The bell warns before the end and once after, like temporary grants.
+- **Revocation** deletes the row, and every request reads it strongly consistent, so it takes
+  effect on the next call. Admins list and revoke every user's tokens (Users → Access tokens).
+- **Audit.** Every activity row written while acting through a token carries `actor.token`
+  (`{ id, name }`).
+
+Turning it on is a config change plus a deploy of `DataStack CredsStack WebStack`; the device list
+and delete routes also need a `NetworkStack` deploy (the device minter answers them).
+
 ## Plugins
 
 Customer plugins are small apps a deployment bolts onto the portal: a
@@ -863,8 +906,9 @@ of this product's frontend, not an arbitrary site.
 ## HTTP API
 
 `openapi.yaml` in the package root describes every route of the portal API
-(OpenAPI 3.1): the two token kinds (a Cognito ID token for people, a
-`client_credentials` access token for service users, who are admins),
+(OpenAPI 3.1): the token kinds (a Cognito ID token for people, a
+`client_credentials` access token for service users, who are admins, and
+personal access tokens),
 request and response shapes, and status codes. The route inventory is
 drift-tested against the mounted routes in the package's test suite; the
 shapes are maintained by hand alongside the code. Requests go to

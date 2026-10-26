@@ -5,7 +5,7 @@
 openapi: 3.1.0
 info:
   title: Infra Client API
-  version: 0.5.0
+  version: 0.6.0
   summary: Self-hosted AWS access portal — credential vending, access requests, admin catalog, private-network resources.
   description: |
     One Express app behind CloudFront (`/api/*`) and API Gateway (no prefix).
@@ -21,9 +21,30 @@ info:
     - **Service user** — a Cognito **access token** minted with the
       `client_credentials` grant by an app client an admin created under
       *Admin → Service users*. It carries the `api/invoke` scope; its `sub` is
-      the client id. **Every service user is an app admin**, so it may call
-      every route below — including `POST /credentials` to vend AWS credentials
-      for the roles granted to it.
+      the client id. Which routes it may call are the **scopes on its registry
+      row**, chosen by the admin and read on every request: `aws`, `network` and
+      `shares` as for personal access tokens below, plus `admin.read.all` (the
+      `GET` routes under `/admin`) and `admin.write.all` (every route under
+      `/admin`, reads included), with the same `403` / `code: "TOKEN_SCOPE"`
+      outside them. The admin scopes make it an **app admin** for those methods
+      — an `admin.write.all` service user manages users and service users like a
+      human admin. Its AWS roles and network resources are ordinary grants with
+      the client id as the `userId`. Service users created before scopes existed
+      carry the full set (`aws`, `network`, `shares`, `admin.write.all`), which
+      reaches the `/admin`, vending, device-key and share routes; routes outside
+      that table (`/requests`, `/notifications`, `/preferences`, `/resources`,
+      `/plugins`) are reachable by no service user. No service user calls the
+      token routes.
+    - **Personal access token** — `icpat_<tokenId>_<secret>`, created by a user on their
+      *Access tokens* page (`POST /tokens`, signed-in session only) for scripts, CI jobs and
+      command-line tools. It acts as its owner, limited to its scopes: `aws` (`GET /accounts`,
+      `POST /credentials`, console links), `network` (`GET /network`, device keys, list/remove own
+      devices), `shares` (`GET /network`, dev shares) or `api` (every route the owner may call —
+      admin routes only while the owner is an admin). A route outside the scopes answers `403` with
+      `code: "TOKEN_SCOPE"`; a wrong, expired or revoked token — or one whose owner is disabled — is a
+      `401`. No token can call the token routes (`/tokens`, `/admin/tokens`) except
+      `GET /tokens/current`, and none reaches plugin routes. Off unless the deployment sets
+      `personalAccessTokens.enabled` (discovery says so).
 
     Token exchange for service users (see the Access Model wiki page, "Service users"):
 
@@ -75,6 +96,8 @@ tags:
     description: Private-network resources the caller can reach.
   - name: Notifications
     description: The caller's revoked-access notices (the bell).
+  - name: Tokens
+    description: Personal access tokens for scripts, CI jobs and command-line tools that act as the user.
   - name: "Admin: setup"
     description: First-run checklist state and branding.
   - name: "Admin: accounts & roles"
@@ -83,8 +106,10 @@ tags:
     description: Who holds which role, directly or via groups.
   - name: "Admin: users"
     description: The Cognito directory and per-user cascades.
+  - name: "Admin: tokens"
+    description: Every user's personal access tokens.
   - name: "Admin: service users"
-    description: Machine-to-machine app clients (client_credentials).
+    description: Machine-to-machine app clients (client_credentials) and their scopes.
   - name: "Admin: groups"
     description: Role/resource bundles whose members inherit the bundle.
   - name: "Admin: requests"
@@ -192,7 +217,7 @@ paths:
                   favorites: { type: array, items: { $ref: "#/components/schemas/AccountAccess" } }
                   recent: { type: array, items: { $ref: "#/components/schemas/AccountAccess" }, description: Newest first. }
                   favoriteNumbers: { type: array, items: { $ref: "#/components/schemas/AccountNumber" } }
-                  layout: { type: string, enum: [auto, sections, plain], description: The deployment-wide setting behind `sectioned` (`PUT /admin/dashboard-layout`). }
+                  layout: { type: string, enum: [auto, sections, plain], description: The deployment's configured `dashboard.layout` behind `sectioned` (auto = sections once a held account is off the Main section). }
                 required: [sectioned, heldTotal, main, favorites, recent, favoriteNumbers, layout]
         "401": { $ref: "#/components/responses/Unauthorized" }
         "502": { $ref: "#/components/responses/Upstream" }
@@ -761,8 +786,17 @@ paths:
                   sites:
                     type: array
                     items: { $ref: "#/components/schemas/PublicSite" }
-                required: [enabled, controlUrl, sites]
+                  devShares:
+                    type: object
+                    description: Whether dev shares can be created, the longest one allowed, and how many live shares one user may hold.
+                    properties:
+                      enabled: { type: boolean }
+                      maxDurationHours: { type: integer, minimum: 1, maximum: 72 }
+                      maxActiveSharesPerOwner: { type: integer, minimum: 1, maximum: 200 }
+                    required: [enabled, maxDurationHours, maxActiveSharesPerOwner]
+                required: [enabled, controlUrl, sites, devShares]
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/TokenScope" }
 
   /network/device-key:
     post:
@@ -773,7 +807,9 @@ paths:
         A single-use, 30-minute enrollment key for ONE site, bound to the
         caller's identity (their `sub` becomes the device's network user).
         Reachability is enforced by the grants→ACL reconciler, not here.
-        Every mint writes an audit event (`NETWORK_KEY`).
+        Every mint writes an audit event (`NETWORK_KEY`). With `ephemeral: true` the
+        device is removed by the control plane once it has been offline for 30 minutes
+        (instead of being expired after 7 idle days) — for short-lived machines.
       requestBody:
         content:
           application/json:
@@ -783,7 +819,11 @@ paths:
                 siteId:
                   type: string
                   description: Defaults to the first site.
-            example: { siteId: "dev" }
+                ephemeral:
+                  type: boolean
+                  default: false
+                  description: Enroll an ephemeral device.
+            example: { siteId: "dev", ephemeral: true }
       responses:
         "200":
           description: The key and where to use it.
@@ -792,6 +832,51 @@ paths:
               schema: { $ref: "#/components/schemas/DeviceKey" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "501": { $ref: "#/components/responses/NotDeployed" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /network/devices:
+    get:
+      tags: [Network]
+      summary: My devices
+      operationId: listMyDevices
+      description: The caller's own enrolled devices on every site, read live from the control planes.
+      responses:
+        "200":
+          description: The caller's devices.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  devices: { type: array, items: { $ref: "#/components/schemas/Device" } }
+                  unreachable:
+                    type: array
+                    items: { type: string }
+                    description: Site ids whose control plane did not answer — their devices are missing from `devices`.
+                required: [devices, unreachable]
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/TokenScope" }
+        "501": { $ref: "#/components/responses/NotDeployed" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /network/devices/{siteId}/{name}:
+    delete:
+      tags: [Network]
+      summary: Remove one of my devices
+      operationId: deleteMyDevice
+      description: |
+        Removes the caller's device(s) answering to `name` on that site — the device's name on the
+        network or the hostname it enrolled with. Someone else's device reads as absent. Kicks the
+        reconciler; writes an activity row.
+      parameters:
+        - { name: siteId, in: path, required: true, schema: { type: string } }
+        - { name: name, in: path, required: true, schema: { type: string, pattern: "^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$" } }
+      responses:
+        "204": { description: Removed. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/TokenScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
         "501": { $ref: "#/components/responses/NotDeployed" }
         "502": { $ref: "#/components/responses/Upstream" }
 
@@ -829,8 +914,13 @@ paths:
         share's definition, then kicks the ACL reconciler so the rule lands within seconds. `hostname`/`ip`
         are the desktop app's own tailnet address — display-only, so grantees get a URL; the rule itself
         targets the owner's enrolled device IPs. `hostname` must be the owner's node name on the share's
-        site (`<name>.<siteId>.tail.internal`). Duration is capped by `network.devShares.maxDurationHours`.
-        At most 10 live shares per owner, one per port. 501 while `devShares` is disabled.
+        site (`<name>.<siteId>.tail.internal`). A longer `durationHours` is clamped to
+        `network.devShares.maxDurationHours`. With `device` (the name of one of the owner's devices on the
+        site) the port opens on that device only — re-resolved by name on every reconciler pass, so a device
+        that re-enrolls under the same name keeps its shares — and always to the owner's own other devices;
+        `grantees` may then be empty and `hostname` defaults to `<device>.<siteId>.tail.internal`. At most
+        `network.devShares.maxActiveSharesPerOwner` (default 10) live shares per owner, one per port per device (a share without `device` covers every device).
+        501 while `devShares` is disabled.
       requestBody:
         required: true
         content:
@@ -844,9 +934,10 @@ paths:
                 durationHours: { type: integer, minimum: 1 }
                 hostname: { type: string, description: The owner's MagicDNS name. }
                 ip: { type: string, description: The owner's tailnet IPv4 (100.64.0.0/10). }
+                device: { type: string, description: "Bind the share to one of the owner's devices by name." }
                 grantees:
                   type: array
-                  minItems: 1
+                  description: At least one, unless `device` is set.
                   maxItems: 50
                   items:
                     type: object
@@ -1013,6 +1104,152 @@ paths:
 
   # ---------------------------------------------------------------- admin ---
 
+  /tokens/current:
+    get:
+      tags: [Tokens]
+      summary: The token I am using
+      operationId: currentToken
+      description: |
+        Who a personal access token acts as and what it may do. Any valid token may call this,
+        whatever its scopes; a signed-in session gets a `400`.
+      responses:
+        "200":
+          description: The token and its owner.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tokenId: { type: string }
+                  name: { type: string }
+                  scopes: { type: array, items: { $ref: "#/components/schemas/TokenScopeName" } }
+                  roles: { type: array, items: { $ref: "#/components/schemas/TokenRole" } }
+                  expiresAt: { type: string, format: date-time }
+                  user:
+                    type: object
+                    properties:
+                      userId: { type: string }
+                      email: { type: string }
+                    required: [userId]
+                required: [tokenId, name, scopes, expiresAt, user]
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /tokens:
+    get:
+      tags: [Tokens]
+      summary: My personal access tokens
+      operationId: listTokens
+      description: The caller's tokens, newest first — expired ones until they drop out a week later. Never the secrets. Signed-in session only.
+      responses:
+        "200":
+          description: The caller's tokens.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tokens: { type: array, items: { $ref: "#/components/schemas/Token" } }
+                required: [tokens]
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/TokenScope" }
+        "502": { $ref: "#/components/responses/Upstream" }
+    post:
+      tags: [Tokens]
+      summary: Create a personal access token
+      operationId: createToken
+      description: |
+        The secret is in this response and nowhere else — only its SHA-256 is stored. `expiresInDays` is
+        required and capped by `personalAccessTokens.maxLifetimeDays` (default 90). `roles` limits an
+        `aws`/`api` token to some of the roles the caller holds now (it never adds any). At most 25 active
+        tokens per user. Signed-in session only; 501 while the feature is off.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, minLength: 1, maxLength: 60 }
+                description: { type: string, maxLength: 200 }
+                scopes: { type: array, minItems: 1, items: { $ref: "#/components/schemas/TokenScopeName" } }
+                expiresInDays: { type: integer, minimum: 1 }
+                roles: { type: array, maxItems: 50, items: { $ref: "#/components/schemas/TokenRole" } }
+              required: [name, scopes, expiresInDays]
+            example: { name: "nightly report", scopes: ["aws"], expiresInDays: 30, roles: [{ accountNumber: "123456789012", roleName: "ReadOnly" }] }
+      responses:
+        "201":
+          description: The token and its secret (shown once).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { $ref: "#/components/schemas/Token" }
+                  secret: { type: string, description: "`icpat_<tokenId>_<secret>` — the bearer token." }
+                required: [token, secret]
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/TokenScope" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "501": { $ref: "#/components/responses/NotDeployed" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /tokens/expiry:
+    get:
+      tags: [Tokens]
+      summary: My token expiry notices
+      operationId: listTokenExpiry
+      description: The bell's two phases for the caller's tokens — expiring soon (the last day, or the second half of a shorter lifetime) and expired in the last 7 days. Signed-in session only.
+      responses:
+        "200":
+          description: Both phases.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  expiring: { type: array, items: { $ref: "#/components/schemas/TokenExpiryNotice" } }
+                  expired: { type: array, items: { $ref: "#/components/schemas/TokenExpiryNotice" } }
+                required: [expiring, expired]
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/TokenScope" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /tokens/expiry/seen:
+    post:
+      tags: [Tokens]
+      summary: Acknowledge my token expiry notices
+      operationId: markTokenExpirySeen
+      responses:
+        "200":
+          description: How many notices were acknowledged.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cleared: { type: integer }
+                required: [cleared]
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/TokenScope" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /tokens/{tokenId}:
+    delete:
+      tags: [Tokens]
+      summary: Revoke one of my tokens
+      operationId: revokeToken
+      description: Takes effect on the token's next request. Someone else's token reads as absent. Signed-in session only.
+      parameters:
+        - { name: tokenId, in: path, required: true, schema: { type: string, pattern: "^[a-f0-9]{16}$" } }
+      responses:
+        "204": { description: Revoked. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/TokenScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
   /admin/setup:
     get:
       tags: ["Admin: setup"]
@@ -1113,45 +1350,6 @@ paths:
         "409": { $ref: "#/components/responses/Conflict" }
         "502": { $ref: "#/components/responses/Upstream" }
 
-  /admin/dashboard-layout:
-    get:
-      tags: ["Admin: accounts & roles"]
-      summary: The deployment-wide dashboard layout
-      operationId: adminGetDashboardLayout
-      description: |
-        How every user's dashboard is laid out. `auto` (the default): a user gets Main / Favorites / Recent and the
-        search once they hold an account an admin took off the Main section, and the plain list until then — so a
-        deployment that never touches the Main flag looks as it always did. `sections`: everyone gets the sections.
-        `plain`: nobody does. The per-account "Show in the Main section" flag still decides what sits in Main.
-      responses:
-        "200":
-          description: The current mode.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/DashboardLayout" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
-        "502": { $ref: "#/components/responses/Upstream" }
-    put:
-      tags: ["Admin: accounts & roles"]
-      summary: Set the deployment-wide dashboard layout
-      operationId: adminSetDashboardLayout
-      description: Takes effect on each user's next dashboard load; a change is recorded in the activity log.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: "#/components/schemas/DashboardLayout" }
-      responses:
-        "200":
-          description: The stored mode.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/DashboardLayout" }
-        "400": { $ref: "#/components/responses/BadRequest" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
-        "502": { $ref: "#/components/responses/Upstream" }
   /admin/accounts/order:
     put:
       tags: ["Admin: accounts & roles"]
@@ -1803,6 +2001,40 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "502": { $ref: "#/components/responses/Upstream" }
 
+  /admin/tokens:
+    get:
+      tags: ["Admin: tokens"]
+      summary: Every user's personal access tokens
+      operationId: adminListTokens
+      description: Newest first, with the owner. Never the secrets. Signed-in admin session only.
+      responses:
+        "200":
+          description: All tokens.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tokens: { type: array, items: { $ref: "#/components/schemas/AdminToken" } }
+                required: [tokens]
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /admin/tokens/{tokenId}:
+    delete:
+      tags: ["Admin: tokens"]
+      summary: Revoke anyone's token
+      operationId: adminRevokeToken
+      parameters:
+        - { name: tokenId, in: path, required: true, schema: { type: string, pattern: "^[a-f0-9]{16}$" } }
+      responses:
+        "204": { description: Revoked. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
   /admin/service-users:
     get:
       tags: ["Admin: service users"]
@@ -1827,7 +2059,7 @@ paths:
       tags: ["Admin: service users"]
       summary: Create a service user
       operationId: adminCreateServiceUser
-      description: Creates a `client_credentials` app client. The `201` body carries the `clientSecret` — **the only time it is ever returned**. Grant roles to it with the ordinary grant routes, using its `clientId` as the `userId`.
+      description: 'Creates a `client_credentials` app client with the given scopes. The `201` body carries the `clientSecret` — **the only time it is ever returned**. Grant roles and resources to it with the ordinary grant routes, using its `clientId` as the `userId`. Needs `admin.write.all` (or a human admin).'
       requestBody:
         required: true
         content:
@@ -1836,8 +2068,9 @@ paths:
               type: object
               properties:
                 name: { type: string, minLength: 1, maxLength: 64, description: Unique among live service users. }
-              required: [name]
-            example: { name: "provisioning-app" }
+                scopes: { type: array, minItems: 1, items: { $ref: "#/components/schemas/ServiceUserScopeName" }, description: "What its tokens may call; `admin.write.all` = every `/admin` route, `admin.read.all` their reads." }
+              required: [name, scopes]
+            example: { name: "vm-provisioner", scopes: ["aws", "network"] }
       responses:
         "201":
           description: The service user and its secret.
@@ -1866,12 +2099,46 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "502": { $ref: "#/components/responses/Upstream" }
 
+  /admin/service-users/{clientId}/scopes:
+    put:
+      tags: ["Admin: service users"]
+      summary: Replace the scopes
+      operationId: adminUpdateServiceUserScopes
+      description: "Replaces the scope set. The registry row is read on every request, so a narrowing holds from the service user's next call — tokens already issued do not keep what they had. Mid-rotation the still-working previous client gets the same set."
+      parameters:
+        - $ref: "#/components/parameters/clientId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                scopes: { type: array, minItems: 1, items: { $ref: "#/components/schemas/ServiceUserScopeName" } }
+              required: [scopes]
+            example: { scopes: ["aws", "network"] }
+      responses:
+        "200":
+          description: The service user with its new scopes.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  serviceUser: { $ref: "#/components/schemas/ServiceUser" }
+                required: [serviceUser]
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
   /admin/service-users/{clientId}/rotate:
     post:
       tags: ["Admin: service users"]
       summary: Rotate the secret
       operationId: adminRotateServiceUser
-      description: Creates a replacement client + secret carrying the same grants; the previous secret keeps working until `DELETE …/previous`. `409` while a previous secret is still active. The returned `serviceUser.clientId` is the NEW id.
+      description: Creates a replacement client + secret carrying the same grants and scopes; the previous secret keeps working until `DELETE …/previous`. `409` while a previous secret is still active. The returned `serviceUser.clientId` is the NEW id.
       parameters:
         - $ref: "#/components/parameters/clientId"
       responses:
@@ -2949,7 +3216,7 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
-      description: A Cognito ID token (humans) or a `client_credentials` access token with the `api/invoke` scope (service users).
+      description: A Cognito ID token (humans), a `client_credentials` access token with the `api/invoke` scope (service users), or a personal access token `icpat_<tokenId>_<secret>`.
 
   parameters:
     accountNumber:
@@ -3052,6 +3319,11 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
+    TokenScope:
+      description: "A personal access token whose scopes do not reach this route, or any token on a token-management route (`code: TOKEN_SCOPE`)."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/TokenScopeError" }
     NotFound:
       description: The addressed thing does not exist.
       content:
@@ -3379,7 +3651,13 @@ components:
                   controlUrl: { type: string, format: uri }
                 required: [id, displayName, controlUrl]
           required: [controlUrl, sites]
-      required: [projectName, cognito, issuer, network]
+        personalAccessTokens:
+          type: object
+          description: Whether this deployment accepts personal access tokens.
+          properties:
+            enabled: { type: boolean }
+          required: [enabled]
+      required: [projectName, cognito, issuer, network, personalAccessTokens]
 
     AccountAccess:
       type: object
@@ -3404,18 +3682,19 @@ components:
         description: { type: string }
         icon: { type: string }
         expiresAt: { type: string, format: date-time, description: End of a temporary grant; absent = long-term. }
+        sessionDurationSeconds: { type: integer, minimum: 900, maximum: 43200, description: How long vended credentials for this role last. }
         profileName: { type: string, description: THE `~/.aws` profile name for this role — what the desktop writes. }
         profileSource: { type: string, enum: [override, account, role, default] }
         suggestedProfileName: { type: string, description: What the name would be without the caller's override. }
-      required: [role, roleArn, profileName, profileSource, suggestedProfileName]
+      required: [role, roleArn, sessionDurationSeconds, profileName, profileSource, suggestedProfileName]
     VendedCredentials:
       type: object
       properties:
         accessKeyId: { type: string }
         secretKey: { type: string }
         sessionToken: { type: string }
-        expiration: { type: string, format: date-time }
-      required: [accessKeyId, secretKey, sessionToken]
+        expiration: { type: string, format: date-time, description: When the credentials stop working (the role's session length); cache until shortly before. }
+      required: [accessKeyId, secretKey, sessionToken, expiration]
     ConsoleSignIn:
       type: object
       properties:
@@ -3585,6 +3864,7 @@ components:
         siteId: { type: string }
         hostname: { type: string }
         ip: { type: string }
+        device: { type: string, description: The one device the share is bound to; absent = every device of the owner on the site. }
         url:
           type: [string, "null"]
           description: "`http://<hostname|ip>:<port>`; null until the desktop app reported an address."
@@ -3630,6 +3910,69 @@ components:
               members: { type: integer }
             required: [groupId, name, members]
       required: [users, groups]
+
+    Device:
+      type: object
+      properties:
+        siteId: { type: string }
+        name: { type: string, description: The device's name on the site's network. }
+        ips: { type: array, items: { type: string } }
+        online: { type: boolean }
+        lastSeen: { type: string, format: date-time }
+        ephemeral: { type: boolean, description: Enrolled with an ephemeral key (removed 30 minutes after going offline). }
+      required: [siteId, name, ips, online, ephemeral]
+
+    TokenScopeError:
+      type: object
+      properties:
+        message: { type: string }
+        code: { type: string, const: TOKEN_SCOPE }
+      required: [message, code]
+    TokenScopeName:
+      type: string
+      enum: [api, aws, network, shares]
+    ServiceUserScopeName:
+      type: string
+      enum: [aws, network, shares, admin.read.all, admin.write.all]
+      description: "A service user's scope: `aws` (list its roles, vend credentials, console links), `network` (device keys, its own devices), `shares` (its devices' shares), `admin.read.all` (`GET` under `/admin`), `admin.write.all` (every method under `/admin`; implies `admin.read.all`). Service users never hold the token-only `api`."
+    TokenRole:
+      type: object
+      properties:
+        accountNumber: { $ref: "#/components/schemas/AccountNumber" }
+        roleName: { type: string }
+      required: [accountNumber, roleName]
+    Token:
+      type: object
+      description: A personal access token as its owner sees it — never the secret.
+      properties:
+        tokenId: { type: string, pattern: "^[a-f0-9]{16}$" }
+        name: { type: string }
+        description: { type: string }
+        scopes: { type: array, items: { $ref: "#/components/schemas/TokenScopeName" } }
+        roles:
+          type: array
+          items: { $ref: "#/components/schemas/TokenRole" }
+          description: The token holds only these of the owner's roles (for `aws` and `api`); absent = all of them.
+        createdAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+        lastUsedAt: { type: string, format: date-time, description: Updated at most every few minutes. }
+      required: [tokenId, name, scopes, createdAt, expiresAt]
+    AdminToken:
+      allOf:
+        - $ref: "#/components/schemas/Token"
+        - type: object
+          properties:
+            ownerId: { type: string }
+            ownerEmail: { type: string }
+          required: [ownerId]
+    TokenExpiryNotice:
+      type: object
+      properties:
+        tokenId: { type: string }
+        name: { type: string }
+        expiresAt: { type: string, format: date-time }
+        seen: { type: boolean }
+      required: [tokenId, name, expiresAt, seen]
 
     DeviceKey:
       type: object
@@ -3751,11 +4094,6 @@ components:
         position: { type: integer, minimum: 0, description: Index in the admin order (the `position` sort key). }
         roles: { type: array, items: { $ref: "#/components/schemas/AdminRole" } }
       required: [accountNumber, roles]
-    DashboardLayout:
-      type: object
-      properties:
-        mode: { type: string, enum: [auto, sections, plain] }
-      required: [mode]
     AccountDims:
       type: object
       description: |
@@ -3987,6 +4325,7 @@ components:
         lastUsedAt: { type: string, format: date-time }
         secretCreatedAt: { type: string, format: date-time }
         reviewedAt: { type: string, format: date-time }
+        scopes: { type: array, items: { $ref: "#/components/schemas/ServiceUserScopeName" }, description: "Routes its tokens may call. Always present: a row from before scopes existed reads as the full set (`aws`, `network`, `shares`, `admin.write.all`)." }
         roles: { type: array, items: { $ref: "#/components/schemas/UserGrant" } }
         previous:
           type: object
@@ -3996,7 +4335,7 @@ components:
             rotatedAt: { type: string, format: date-time }
             lastUsedAt: { type: string, format: date-time }
           required: [clientId]
-      required: [clientId, name, createdAt, createdBy, roles]
+      required: [clientId, name, createdAt, createdBy, scopes, roles]
     ServiceUserWithSecret:
       type: object
       properties:

@@ -139,6 +139,28 @@ curl -s -X PUT "<ApiUrl>admin/accounts/<ACCT>/roles/SandboxReadOnly/grants/<sub>
   -H "Authorization: Bearer $JWT"
 ```
 
+## Only the password is offered
+
+The sign-in page lists what Cognito offers for that attempt. With `loginMethods.threatProtection` on, Cognito scores every attempt; on an attempt it applies an MFA action to, choice-based sign-in offers only the password — passkey and email code disappear for that attempt, even for a user who has both. The package allows Medium risk (a new network) and applies "MFA if configured" only at High, so this is rare; when a user reports it:
+
+1. Read the user's recent attempts and their scores (times are UTC):
+
+   ```bash
+   aws cognito-idp admin-list-user-auth-events --user-pool-id <pool-id> --username <email> --max-results 10 \
+     --query 'AuthEvents[].{t:CreationDate,risk:EventRisk.RiskLevel,ip:EventContextData.IpAddress,id:EventId}' --output table
+   ```
+
+2. If the attempts are the user's own, mark them valid — Cognito lowers the risk it assigns to later sessions with the same characteristics (it is not instant):
+
+   ```bash
+   aws cognito-idp admin-update-auth-event-feedback --user-pool-id <pool-id> --username <email> \
+     --event-id <event-id> --feedback-value Valid
+   ```
+
+   The same is available in the Cognito console under the user's event history ("Set as valid").
+
+3. The user can always sign in by password meanwhile; the other methods return once the score drops. A user with TOTP enrolled is asked for it on a High-risk attempt.
+
 ## Federated sign-in (SSO)
 
 One-time per identity provider, per deployment. After this, staff sign in with their corporate account, portal access ends when that account is disabled, and the identifier the customer's other systems key on (an employee id — Entra's `oid` claim, say) reads on the user record, in the portal's own token and on every audit row. Configuration reference: [`loginMethods.federation[]`](Configuration-Reference#loginmethodsfederation). Entra ID is the worked example below; any OIDC provider works the same way.

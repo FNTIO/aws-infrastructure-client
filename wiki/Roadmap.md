@@ -19,7 +19,7 @@ The distribution model settled with it:
 | --- | --- | --- |
 | 1 | Credential Vending / User Management API | Shipped, largely done; hardening ideas remain |
 | 2 | Web Application for User Management / Credential Vending | Shipped and in progress: live on S3 + CloudFront, feature work continues |
-| 3 | Desktop App (Electron, multi-backend) | Shipped: v0.1 (2026-07-22); a signed macOS installer ships on every Release since 0.1.14; auto-update, Windows signing and the discovery-URL registry remain to harden |
+| 3 | Desktop App (Electron, multi-backend) | Shipped: v0.1 (2026-07-22); a signed macOS installer ships on every Release since 0.1.14 and updates itself from the Release feed since 0.4.0 (feed on the public repository since 0.5.0); Windows self-install waits on a signed installer, and the discovery-URL registry remains to harden |
 | 4 | Private VPC Access (Tailscale-like) | Shipped: slices 1 to 5 verified (2026-07-27); per-site control planes deployed and verified (2026-08-13) |
 
 Each epic keeps a scope statement, an implementation log, a decision log and an ideas list with the product owner.
@@ -51,7 +51,7 @@ The sequencing in the source: finish hardening Epic 1 (the contract every client
 With all four epics shipped in some form, the nearest work is packaging, nearest first:
 
 1. Publish the package: the tarball is pack-ready; the remaining items (prepack freshness guard, snapshot suite, the import CLI, a StackSet template) are listed on [[Releasing]].
-2. Desktop release pipeline: sign, notarize and publish once per release; GitHub Releases plus electron-updater; a compat test for the `/.well-known/infra-client` contract.
+2. Desktop release pipeline: done since 0.5.0 (signed, notarized and published once per release; GitHub Releases plus electron-updater). Left: a compat test for the `/.well-known/infra-client` contract.
 3. Going public: move `infra/` to a private repo, seed a fresh public repo from a cleaned snapshot, split `docs/` by audience.
 4. Documentation: a developer docs site seeded from the getting-started narrative and the package's TSDoc, and end-user docs inside the web UI.
 

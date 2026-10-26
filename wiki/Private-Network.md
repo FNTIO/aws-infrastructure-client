@@ -48,7 +48,13 @@ Detail: [Resource catalog and per-resource access](Private-Network#resource-cata
 
 With `network.devShares.enabled`, a user can share one local port on their laptop with named users or groups on the same site for a bounded time — the "show a teammate my dev server" case, without a staging deploy or a public tunnel. A share is a grant target like a resource (`share#<id>` rows, effective access from the [[Access Model]]) plus a definition row on the fixed `sharedef` principal. Every share row carries the share's expiry (the access model treats an expired row as inactive whoever holds it) and a DynamoDB TTL. The reconciler renders it as `src: u-<grantee>@`, `dst: <owner tailnet IPv4>/32:<port>` from the owner's enrolled devices, and the API kicks a pass on create and stop. The desktop app runs `tailscale serve --http=<port>` so a dev server bound to localhost is reachable; every path that ends the tunnel also ends the serves. Plain HTTP over the encrypted tunnel (Headscale cannot issue the certificate `--https` needs). Owner or admin stops it; grantees get a `SHARE` revocation notice. `GET /network/shares/directory` is the one directory read open to non-admins. Joining a site needs no VPC grant there (the device key is minted for any configured site; the policy decides what a device reaches), so a share can be the only thing a user holds on a site: the Network page groups by network with one Connect per site (a share alone earns a site its group), the desktop pill's chooser lists every site, and a first-time joiner is admitted on the next reconciler pass.
 
+A share can be **bound to one device** (`device`, the device's name on the site): the rule then targets only the IPv4s of the owner's node answering to that name (its DNS name or the hostname it enrolled with), re-resolved on every pass, so a machine that re-enrolls under the same name keeps its shares. A bound share is always open to the owner's own other devices (`src: u-<owner>@`), may name no grantees, and the one-share-per-port rule applies per device. A requested duration above `maxDurationHours` is clamped to it. One user holds at most `maxActiveSharesPerOwner` live shares (default 10).
+
 Detail: [Sharing a local port](https://github.com/FNTIO/aws-infrastructure-client/blob/main/desktop/README.md#sharing-a-local-port-dev-shares).
+
+## My devices
+
+Every machine joined to a site with a user's account is a device of theirs: the desktop app on their computer (one entry per site it has connected to), and any remote development machine or VM enrolled with one of their [[Personal Access Tokens]] (`POST /network/device-key`, optionally `ephemeral: true`, which removes the device 30 minutes after it goes offline). The Network page lists them under **My devices** across every site (`GET /network/devices`), with a **Remove** action (`DELETE /network/devices/{siteId}/{name}`, 404 for anyone else's); in the desktop app the row that is this computer on the active site carries a **this device** badge. A non-ephemeral device that stays offline 7 days is expired by the reconciler. A stale entry keeps its name, so the same machine joining that site again gets a suffixed one; the device-bound share form offers only the devices on the share's site. Detail: [[Personal Access Tokens]] and the package README, [Personal access tokens](https://github.com/FNTIO/aws-infrastructure-client/blob/main/packages/infra-client/README.md#personal-access-tokens).
 
 ## Split DNS
 
@@ -152,7 +158,16 @@ devices stay enrolled.
 
 `POST /network/device-key` lets ANY signed-in user enroll; per-user
 reachability is enforced by the ACL reconciler below, not at enrollment. Every
-mint is an audit row (`action: NETWORK_KEY`).
+mint is an audit row (`action: NETWORK_KEY`). With `ephemeral: true` the key is
+an ephemeral one: Headscale deletes the node after 30 minutes offline
+(`ephemeral_node_inactivity_timeout`) instead of the reconciler expiring it
+after 7 idle days. The device handler also answers `op: "list"` (the caller's
+nodes on every site, for `GET /network/devices`; a site whose control plane
+does not answer is named in `unreachable` instead of failing the list) and
+`op: "delete"` (the one node listed under that name on one site — never a
+lookalike, so removing a stale duplicate leaves the re-enrolled machine
+alone); both act only on the `u-<sub>` user the API bound, so they reach
+nobody else's devices.
 
 ## Resource catalog & per-resource access
 

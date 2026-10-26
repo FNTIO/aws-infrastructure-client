@@ -155,3 +155,7 @@ export function scanTree(dir, classify, rules) {
 // by the preview pages are scanned as product code; stories and specs are not).
 export const TEST_IMPORT = /\bfrom\s+["'][^"']*(?:\.stories|\.spec|\.test|__tests__|\/e2e\/)[^"']*["']/;
 export const isTestFile = (rel) => /(^|\/)(__tests__|e2e)\/|\.(spec|test|stories)\.[cm]?[jt]sx?$|\.mdx$/.test(rel);
+// Third-party code shipped verbatim — AWS's fingerprint collector under frontend/public/vendor, the API's
+// vendor_modules — carries upstream's hostnames and magic numbers, never ours, so it is skipped everywhere.
+// The flip side: nothing of our own may live under a vendor/ folder.
+export const isVendoredFile = (rel) => /(^|\/)(vendor|vendor_modules)\//.test(rel);

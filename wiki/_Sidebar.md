@@ -9,6 +9,7 @@
 - [[User Guide]]
 - [[Admin Guide]]
 - [[API Integration]]
+- [[Personal Access Tokens]]
 
 **How it works**
 - [[Architecture]]

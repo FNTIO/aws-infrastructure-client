@@ -181,7 +181,8 @@ per endpoint. New route = add `routes/<x>.ts` + `services/<x>Service.ts`.
   EventBridge schedule** — it raises a reapproval request into the admin queue for
   standing (long-term, direct) grants past their 12-month mark and auto-revokes any
   left un-reapproved past the grace window.
-  Hardening 2026-07-27: vend API stage throttle 25 rps / 50 burst; every Lambda
+  Hardening 2026-07-27: vend API stage throttle (`apiThrottle`, 25 rps / 50 burst
+  then, 100 / 200 by default since the per-token WAF rule took over the leaked-token job); every Lambda
   gets 3-month log retention via the shared `AppFunction` construct.
 - **`TargetAccountStack`** ([lib/target-account-stack.ts](https://unpkg.com/browse/@fntio/infra-client@latest/dist/lib/target-account-stack.js))
   — a **target** account (B): an IAM OIDC provider trusting account A's issuer

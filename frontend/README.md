@@ -23,7 +23,7 @@ its pool ids; refresh it from the `WebStack` stack outputs (`SpaClientId`,
 `CredsStack.UserPoolId`) if the backend is redeployed elsewhere. The deploy
 also writes feature flags into it — `passkey`, `mfa`, `network` (VPN
 sites exist; `false` hides the Network pages and `networkGuard` redirects
-their routes), `devShares`, `federation` and `plugins` (each present only
+their routes), `devShares`, `federation`, `plugins` and `personalAccessTokens` (each present only
 when the deployment enables it; the list is the `appConfig` object in
 `web-stack.ts`) — so keep the dev copy's flags matching the deployment you
 develop against. API calls
@@ -82,10 +82,12 @@ don't want the default look.
 
 The plugin spec (`e2e/plugins.spec.ts`) assumes the deployment registers the
 reference plugin and the e2e admin holds `admin` on it DIRECTLY (not through a
-group): its access-loss test revokes that grant over the API, expects the open
-admin page to end, and regrants it in a `finally` — so for a few seconds the
-Parameters entry is gone from that user's sidebar, and the file runs its tests in
-order on one worker. Signing out revokes the refresh token server-side, so the
+group). The access-loss test (`e2e/plugins.mutating.spec.ts`) revokes that grant
+over the API, expects the open admin page to end, and regrants it in a `finally`
+— so for a few seconds the Parameters entry is gone from that user's sidebar.
+Any other worker reading discovery in that window would see it missing, so the
+`*.mutating.spec.ts` files form their own Playwright project that runs after
+every other spec. Signing out revokes the refresh token server-side, so the
 sign-out test signs in on its own context instead of ending the shared session.
 
 Commands:
@@ -301,6 +303,31 @@ is sent. Cognito remains the authenticator: the page drives the choice-based
 Cognito does all password/passkey/code verification, throttling, and token
 minting; SES still sends the code emails.
 
+- **Threat-protection context data** (`user-context-data.ts`): Cognito scores every attempt for
+  account-takeover risk and, from a plain fetch, sees little beyond the IP address — a known
+  user on a new network scores Medium. Every `InitiateAuth` / `RespondToAuthChallenge` that
+  names a user therefore carries `UserContextData.EncodedData`, the device fingerprint from
+  AWS's collector script, so the score keys on the device. The script is vendored at
+  `public/vendor/amazon-cognito-advanced-security-data.min.js` (the CSP allows no third-party
+  script hosts): fetched 2026-10-19 from AWS's public Cognito assets bucket — the script URL
+  under "Adding user device and session data to API requests" in
+  https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-user-pool-settings-adaptive-authentication.html —
+  ETag `f114c0fc11a637cf5e7b845216b144d0`, Last-Modified 2017-11-29, SHA-256
+  `76c8c8dd37624451353be94098f7f7594665abb6b9630049b5a30d9552c0c992`, 268 KB. To update,
+  re-fetch, replace the file and these three values. The login page starts the load on
+  construction; the wrapper waits for it at most 3 s and sends no context data when the
+  collector is missing or throws — a fingerprint never blocks a sign-in. No app-client
+  setting is needed for `EncodedData` alone (an IP needs a client secret, which the SPA client
+  has none of). Proof lives in the pool's event history (`admin-list-user-auth-events`):
+  risk levels for a known device on a new network.
+- **"Only your password is offered" hint**: when the device remembers a passkey or email-code
+  sign-in for the typed email but Cognito's `AvailableChallenges` lacks it while listing the
+  password, the chooser and the password screen show a one-line notice. That is Cognito
+  applying an MFA action to the attempt (threat protection; the package allows Medium risk and
+  steps up only at High — wiki Runbooks-Users, "Only the password is offered"); choice-based
+  sign-in then offers the password alone. The notice relies on the remembered method on
+  purpose: a user with no passkey on a pool without email code also sees a password-only
+  list, and must not be told it is unusual.
 - **Federated sign-in (SSO)** (`federation.ts`; `/auth/callback` is the login page's `sso` screen): with
   `config.json.federation` set, the email screen leads with one "Sign in with …" button per
   provider and folds the local form behind "Sign in another way" (it opens by itself for an
@@ -735,6 +762,26 @@ downloads `GET /api/admin/access-report` (current state, one row per person × t
   route to `?bell=1`, which opens the bell popup and scrubs the param.
 - The desktop shell must open console URLs via the bridge (`openConsole`) because
   a WebContentsView swallows `window.open`.
+- **Personal access tokens** (only when `config.json` carries
+  `personalAccessTokens.enabled`; `personalTokensConfig()` in
+  `core/auth/personal-tokens.guard.ts` is the one read, and it treats an unloaded config as
+  off so stories and tests need no fake): the user menu's **Access tokens** item opens
+  `/tokens` (`features/tokens/`), where a person creates tokens for scripts, CI jobs and
+  command-line tools — name, scopes, expiry in days up to `maxLifetimeDays`, and for the
+  `aws`/`api` scopes an optional subset of their current roles. The secret is shown once on
+  the docked panel's second screen; the list never carries it. Admins see and revoke every
+  user's tokens on the Users page's **Access tokens** tab (`?tab=access-tokens`). Token
+  expiry reaches the bell and pop-ups through `GET /api/tokens/expiry`, the same two-phase
+  feed shape as roles, resources and plugins (kind `expiring`, routed to `/tokens`).
+- **My devices** on the Network page lists the caller's own enrolled devices across
+  every site (`GET /api/network/devices`) with a Remove action; it renders in the browser
+  too, so a stale remote machine can be removed without the desktop app. An intro line says
+  what the list is and how a machine gets on it, the empty state says how to add one, and in
+  the desktop app the row that is this machine on the active site carries a **this device**
+  badge (the shell's own node name from `networkStatus`, matched by name and site — the same
+  laptop enrolled on another site is a separate row without it; disconnected, the shell has only
+  the raw hostname, so both names are compared with spaces and punctuation folded out). The share form's **Serve from**
+  hint names the site, since only that site's devices are offered.
 
 ## Network resources & admin catalog pages (Epic 4)
 
@@ -765,21 +812,21 @@ User-facing:
   same request/approval flow as roles. Reachability changes take ≤5 min
   (the ACL reconciler's cadence) — the UI says so rather than pretending
   it's instant.
-- **Dev shares** (desktop only, `config.devShares.enabled`) — a "Teammates’
-  laptops · <site>" group above the account groups (the subtitle gains "and
-  teammates’ laptops": the page lists what the VPN connection can reach, and
-  a shared laptop is one more such thing) with two boxes (`share-box`): **My
+- **Dev shares** (desktop only, `config.devShares.enabled`) — a **Shares**
+  group after the VPC blocks (the subtitle gains "and teammates’ laptops":
+  the page lists what the VPN connection can reach, and a shared laptop is
+  one more such thing) with two boxes per site (`share-box`): **My
   shares** (share cards with Stop sharing / Open in browser — the same link
   grantees get; the URL row has the copy icon — and a relay chip:
   Serving, Starting… on the first attempt, Not serving, or Paused while the
   VPN is off or on another site) and **Shared with me** (owner, URL, Test
   connection via the shell's probe, Open in browser).
   A share can be a grantee's only reason to be on a site, so a share is
-  never made to depend on holding a VPC there: on the single-site layout
-  the boxes carry the VPC bar's VPN control (`vpn-control`: **Connect** /
+  never made to depend on holding a VPC there: each box carries its site's
+  VPN control like a VPC bar (`vpn-control`: **Connect** /
   **Switch & connect** until the VPN is on that site, then the pill —
-  Connected, or the relay summary for My shares); on multi-site the boxes
-  sit inside their network's group (below) and carry no control. Cards
+  Connected, or the relay summary for My shares); with several sites the
+  box label names its site. Cards
   never carry a connect control; the owner card only says it's served
   once connected there. "Not serving" covers every reason the relay
   isn't running on this device — the shell refused it, the shell predates
@@ -787,30 +834,37 @@ User-facing:
   bind-to-0.0.0.0 fallback, which works regardless of the cause (the ACL
   rule is the real access). The header's **Share a local port**
   (secondary button, also the tray's opener) docks `share-port-panel`: port +
-  label, the grantee picker over `GET /network/shares/directory` (users and,
-  when allowed, groups), a duration capped by config, and the URL preview.
+  label, a **Serve from** picker (only when `GET /network/devices` lists
+  another of the user's devices on the site: "This device" or that device,
+  which binds the share with `device` and lets the server derive the URL; a
+  bound share needs no grantees), the grantee picker over
+  `GET /network/shares/directory` (users and, when allowed, groups), a
+  duration capped by config, and the URL preview. The owner card names a
+  bound share's device.
   `shares.store.ts` owns the lists (60 s polling while the page is open) and
   the relay reconciliation: every live share of mine on the ACTIVE site is
-  served, anything else the shell runs is stopped; a shell without share
+  served — except one bound to another device, which that device relays —
+  anything else the shell runs is stopped; a shell without share
   IPC marks every wanted share failed with that reason instead of leaving
   the card at Starting… forever. Same-site only — the share panel names
   the site a new share is created on. A browser never shows
   any of it (no relay, no VPN). Rationale + config: the wiki's Private
   Network page, "Dev shares"; end-user steps: desktop/README.md "Sharing a
   local port".
-- **Multi-site deployments group the Network page by NETWORK** (desktop
-  only — the browser never loads the site list, so its layout and the e2e
-  baselines stay the single-site one). One `project-group` per site with
-  the one VPN control (`vpn-control`, in the header's `groupActions` slot)
-  and a `summary` ("2 VPCs · 1 laptop"); beneath it the VPC bars (account
-  in the `detail` slot, `control` off — verdict pill only) and the **My
-  shares** / **Teammates’ laptops** boxes; a site with nothing says so
-  and still has Connect. Single-site keeps account → VPC groups plus the
-  Teammates’ laptops section, where every bar carries the control (any of
-  them connects the one network). `vpn-control` is the ONE Connect /
-  Switch & connect / in-flight pill for every bar; hosts render their own
-  connected pill. VPCs whose account no site claims fall back to the
-  single-site account group.
+- **The Network page is a flat list of VPC blocks** (since 2026-10-19;
+  before that, multi-site deployments nested VPCs under a block per
+  network). One `vpc-group` per granted VPC, whatever the site count: the
+  bar names the VPC (its DNS zone, else "Private network"), the account in
+  the `detail` slot, the site as a neutral chip (`site`, only when the
+  deployment has several sites and one claims the account) and the VPN
+  control for that site (`vpn-control`: Connect, **Switch & connect** when
+  the VPN is up elsewhere, the in-flight pill, the Reachable / No answer
+  verdict once connected). Then the **Shares** group and **My devices**.
+  A row of section chips under the header (`jumps`, the dashboard's idiom:
+  one per VPC, Shares, My devices, each with its count; shown when there
+  is more than one) scrolls to the block's `data-jump` anchor. Nobody
+  looks for a site; people look for a VPC, so the site is a label, not a
+  tier. The browser never loads the site list, so it never shows the chip.
 - **The Connect pill's chooser is ONE list, network → VPCs** (multi-site
   deployments only — with one site, a pill click connects and the flat
   granted-VPC list stays). A network (site) row carries the only control

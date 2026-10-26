@@ -48,7 +48,7 @@ The first-auth factors the sign-in page offers. Changeable later. The block belo
 | `passkey` | optional | WebAuthn: Touch ID, Face ID, Windows Hello, security keys. Requires the `web` block, because passkeys bind to the custom web domain (synth check). |
 | `emailOtp` | optional | Passwordless one-time code by email. |
 | `mfa` | optional (`"optional"` or `"required"`); mandatory when password is the only first factor | TOTP second factor for password sign-ins. Passwordless factors are never challenged. A password-only pool must set it (synth check). |
-| `threatProtection` | optional | Cognito threat protection in full-function mode: blocks password sign-ins with known-leaked passwords and steps risky sign-ins up to MFA. Needs `mfa` set (synth check). PLUS feature plan, about $0.02 per monthly active user. |
+| `threatProtection` | optional | Cognito threat protection in full-function mode: blocks password sign-ins with known-leaked passwords, allows Medium-risk sign-ins, and steps High-risk sign-ins up to MFA (if the user enrolled; the user is emailed when `email` is set). Needs `mfa` set (synth check). PLUS feature plan, about $0.02 per monthly active user. On an attempt Cognito applies MFA to, only the password is offered — [[Runbooks-Users]], "Only the password is offered". |
 | `federation` | optional | Sign in with the customer's own identity provider (OIDC), one entry per provider — see the table below. Local methods stay available underneath (Cognito requires password). Runbook: [Federated sign-in (SSO)](Runbooks-Users#federated-sign-in-sso). |
 
 ### `loginMethods.federation[]`
@@ -142,6 +142,23 @@ WAF on CloudFront and the API, on by default (about $26 a month). Turning it off
 | `rateLimit` | optional, default 5000 | `/api/*` requests per client IP per 5 minutes before CloudFront answers 429. One office NAT is one IP, so size for the office. |
 | `perTokenRateLimit` | optional, default 2000 | API requests per bearer token per 5 minutes before the API's WAF answers 429; a ceiling on a runaway or leaked token, sized above the product's own bulk bursts. |
 
+### `apiThrottle`
+
+The vending API's stage throttle: the deployment-wide ceiling on requests per second across every caller (people, service users, tokens, the import CLI) and on direct `execute-api` hits that bypass CloudFront's WAF. It is not a per-caller limit; that is `waf.perTokenRateLimit`. One page load is 10 to 15 API calls, so size it for everyone opening the portal at once. Each field is a synth-checked integer within API Gateway's own account ceilings.
+
+| Field | Required | What it controls |
+| --- | --- | --- |
+| `rateLimit` | optional, default 100 | Sustained requests per second for the whole stage (1 to 10000). |
+| `burstLimit` | optional, default 200 | Requests the stage absorbs at once above the sustained rate (1 to 5000). |
+
+### `dashboard`
+
+How every user's dashboard is laid out. Optional; absent = `auto`. Set here, like every deployment-wide choice; there is no switch on the admin Accounts page. See [[Admin Guide]], "Dashboard layout".
+
+| Field | Required | What it controls |
+| --- | --- | --- |
+| `layout` | optional, default `auto` | `auto`: a user gets Main / Favorites / Recent and the search once they hold an account an admin took off the Main section, and the plain list until then. `sections`: everyone gets the sections. `plain`: nobody does (synth check). The per-account **Show in the Main section** flag still decides what sits in Main. |
+
 ### `network`
 
 Per-site VPN control planes. Omit it and no `NetworkStack` deploys and the portal shows no Network pages. A site is one routing domain; site ids are permanent once anything enrolls. See [[Private Network]].
@@ -153,7 +170,7 @@ Per-site VPN control planes. Omit it and no `NetworkStack` deploys and the porta
 | `sites` | required, at least one | Keyed by site id: lowercase DNS label, letter-first, at most 20 characters (synth check). |
 | `mirrorImages` | optional, default `false` | Run the control servers from a copy of the Headscale image in the hub's own registry, made at deploy, so a task restart never depends on the public registry being reachable. Turning it on or off restarts each control server once, and it needs `npm install cdk-ecr-deployment` in your project. Connector stacks take the same switch as the `mirrorImages` prop. See [Private Network](Private-Network#images-from-your-own-registry). |
 | `containerInsights` | optional, default = `prod` | CloudWatch Container Insights on the control-plane cluster; a few dollars a month. |
-| `devShares` | optional, off | `{ enabled, maxDurationHours?, allowGroupTargets? }`: users share one local port with teammates on the same site (the desktop app runs the relay). `maxDurationHours` 1 to 72, default 8 (synth check); `allowGroupTargets` default true. See [[Private Network]]. |
+| `devShares` | optional, off | `{ enabled, maxDurationHours?, allowGroupTargets?, maxActiveSharesPerOwner? }`: users share one local port with teammates on the same site (the desktop app runs the relay). `maxDurationHours` 1 to 72, default 8 (synth check) — a longer request is clamped to it, so set 72 when shares should outlive a weekend; `allowGroupTargets` default true; `maxActiveSharesPerOwner` — how many live shares one user may hold — 1 to 200, default 10 (synth check). See [[Private Network]]. |
 
 Each site is a `SiteConfig`:
 
@@ -182,6 +199,15 @@ Customer plugins — independently built UIs and Lambda routes a deployment regi
 | --- | --- | --- |
 | `enabled` | required when the block is present | `true` provisions the plugin runtime — see [Plugins](https://github.com/FNTIO/aws-infrastructure-client/blob/main/packages/infra-client/README.md#plugins) in the package README for what a deploy creates and the install/update/remove lifecycle. |
 | `discoveryRefreshSeconds` | optional, default `60` | How often a signed-in portal re-reads which plugin pages the user may open. Integer between 15 and 300 (synth check). |
+
+### `personalAccessTokens`
+
+Personal access tokens: every user creates scoped, revocable tokens (`api`, `aws`, `network`, `shares`) for scripts, CI jobs and command-line tools that act as them. Optional; absent or `enabled: false` = no token is accepted and the UI hides the feature. Always present, on or off: the tokens table. See [[Personal Access Tokens]].
+
+| Field | Required | What it controls |
+| --- | --- | --- |
+| `enabled` | required when the block is present | `true` reaches the API (tokens accepted, `POST /tokens` open, discovery says `personalAccessTokens.enabled`) and `config.json` (the Access tokens page). |
+| `maxLifetimeDays` | optional, default `90` | The longest expiry a user may give a token. Integer between 1 and 365 (synth check). |
 
 ### `accountDimensions`
 

@@ -299,7 +299,10 @@ never showed it.
 
 **Using it.** Connect the network (the pill at the bottom of the sidebar),
 open **Network → Share a local port**, enter the port your dev server listens
-on, pick teammates or groups, choose how long, **Start sharing**. Teammates see it
+on, pick teammates or groups, choose how long, **Start sharing**. If you have
+another device enrolled on the site (a remote dev box joined with an access
+token, say), **Serve from** lets you pick it instead of this laptop; such a
+share is always open to your own devices, so teammates are optional. Teammates see it
 under **Network → Dev shares → Shared with me** with a ready-made
 `http://<your-laptop>.<site>.tail.internal:<port>` link. Their app must be
 connected to the same site: that network's group on the Network page (on a
@@ -389,6 +392,13 @@ Troubleshooting:
   drop all.
 - **`~/.aws/credentials`** — one file; a name collision between backends is
   refused with a rename hint, never silently overwritten.
+- **Offline at launch** — a saved deployment nobody could reach (no DNS, no
+  route, a timeout; typically the app reopening after a reboot before Wi-Fi
+  is back) shows as **· waiting for network** and is re-probed on its own:
+  every 10 s while the machine is offline, then with backoff for about ten
+  minutes once it is online, after which the tab reads **· unreachable**. A
+  host that answers but is not an Infra deployment is unreachable at once.
+  Clicking a waiting or unreachable tab retries it now; its ✕ removes it.
 - **Closing a tab doesn't lose the address** — the ＋ button's connect screen
   lists every deployment you connected to before under **Recently
   connected**; click one to reconnect, or its ✕ (and confirm) to forget it

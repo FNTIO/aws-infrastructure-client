@@ -20,7 +20,7 @@ Runbooks: [Cross-account: trust a second account](Access-Model#cross-account-tru
 | `<prefix>-api` | `CredsStack`, hub region | The vending API's REST stage, so direct execute-api hits are inspected too |
 | `<prefix>-issuer` | `WebCertStack`, us-east-1 | The issuer distribution. Observe-only: every rule in COUNT, because STS is its only client and a false positive would fail every vend with no alarm |
 
-Rules: a per-IP limit on `/api/*` (web ACL only, `waf.rateLimit`, default 5000 per 5 minutes, sized for an office NAT); a per-token limit keyed on the `authorization` header (API ACL only, `waf.perTokenRateLimit`, default 2000 per 5 minutes, a ceiling per token rather than a user quota); and the AWS managed `AmazonIpReputationList`, `KnownBadInputsRuleSet` and `CommonRuleSet`, with five Common body and user-agent rules in COUNT because real traffic (data-URI logos, bulk imports, service-user clients) trips them. Blocked and counted requests log to `aws-waf-logs-<prefix>-*` with 3-month retention and the `authorization` and `cookie` headers redacted; sampling is off. About $26 per month per deployment. The API stage also throttles at 25 rps with a burst of 50.
+Rules: a per-IP limit on `/api/*` (web ACL only, `waf.rateLimit`, default 5000 per 5 minutes, sized for an office NAT); a per-token limit keyed on the `authorization` header (API ACL only, `waf.perTokenRateLimit`, default 2000 per 5 minutes, a ceiling per token rather than a user quota); and the AWS managed `AmazonIpReputationList`, `KnownBadInputsRuleSet` and `CommonRuleSet`, with five Common body and user-agent rules in COUNT because real traffic (data-URI logos, bulk imports, service-user clients) trips them. Blocked and counted requests log to `aws-waf-logs-<prefix>-*` with 3-month retention and the `authorization` and `cookie` headers redacted; sampling is off. About $26 per month per deployment. The API stage also throttles at `apiThrottle` (default 100 rps with a burst of 200) across every caller.
 
 **By construction, any config.** ERROR-level execution logs and X-Ray on the API stage; both CloudFront distributions HTTPS-only with the `TLSv1.2_2021` viewer policy and Origin Access Control on their buckets; a pinned Cognito password policy and an explicit `mfa` choice (a password-only pool fails at synth until it picks one); on-demand DynamoDB; the VPN VPC with its default security group stripped, REJECT-only flow logs and only 443 open; Fargate tasks non-privileged, without credential env vars, with logs on every container; encrypted EFS with per-site access points; the Headscale ALB with a single TLS 1.3 listener; key-scoped `kms:Sign`; Node 22 Lambdas; SSL-only buckets and topics; 3-month log retention on every Lambda the package writes (the framework functions CDK adds for the `Custom::FirstAdmin` and `Custom::HeadscaleApiKey` providers keep CloudWatch's never-expire default).
 
@@ -98,7 +98,7 @@ Rules, in order:
    on purpose: behind CloudFront the only per-viewer IP WAF offers there is
    the client-writable `X-Forwarded-For`, which an attacker can rotate to
    bypass or set to a victim's IP to lock an office out; direct execute-api
-   hits stay bounded by the stage throttle (25 rps / 50 burst).
+   hits stay bounded by the stage throttle (`apiThrottle`, default 100 rps / 200 burst).
 2. **Per-token rate limit — API ACL only.** `waf.perTokenRateLimit` API
    requests per bearer token per 5 minutes (default 2000), same 429 answer.
    The aggregation key is the `authorization` header value, i.e. the Cognito
@@ -114,8 +114,8 @@ Rules, in order:
    session keeps one ID token for up to an hour and each refresh starts a
    new bucket; a service user can mint a fresh client-credentials token at
    any time and start over. What it buys: a leaked or runaway token cannot
-   hammer the API unbounded (at the 25 rps stage throttle, 2000 calls is
-   80 s of saturation per 5 minutes, then nothing) and one token cannot
+   hammer the API unbounded (at the default 100 rps stage throttle, 2000
+   calls is 20 s of saturation per 5 minutes, then nothing) and one token cannot
    starve everyone else for the rest of the window. It is **not** flood
    protection — junk tokens each get their own bucket and die with a 401 at
    the API, which is what the per-IP rule and the stage throttle are for.
@@ -281,7 +281,7 @@ these on purpose — it is meant to be disposable.
 
 | Control | Knob | Cost / caveat |
 | --- | --- | --- |
-| Cognito.4 (and Cognito.1 for NIST/PCI users) | `loginMethods.threatProtection: true` (requires `mfa` set) | PLUS feature plan, ~$0.02 per monthly active user, no free tier. Blocks password sign-ins with known-leaked passwords (not the SRP flow scripts may use — SRP never sends the password); risky sign-ins step up to TOTP only if the user enrolled, never a hard block. Re-run the e2e login flows after flipping it. Turning it off again is untested: if Cognito refuses the plan downgrade, delete the pool's risk configuration by hand first |
+| Cognito.4 (and Cognito.1 for NIST/PCI users) | `loginMethods.threatProtection: true` (requires `mfa` set) | PLUS feature plan, ~$0.02 per monthly active user, no free tier. Blocks password sign-ins with known-leaked passwords (not the SRP flow scripts may use — SRP never sends the password); Medium-risk sign-ins (typically a new network) are allowed; High-risk ones step up to TOTP if the user enrolled and send the user an email (when `email` is configured), never a hard block. Cognito offers only the password on an attempt it applies MFA to — passkey and email code disappear for that attempt — which is why Medium allows: see [[Runbooks-Users]], "Only the password is offered". Re-run the e2e login flows after flipping it. Turning it off again is untested: if Cognito refuses the plan downgrade, delete the pool's risk configuration by hand first |
 | ECS.12 on a connector | `containerInsights: true` on `ConnectorStack` / `TailnetConnector` | per-metric cost in the workload account |
 
 **Cost knobs NOT built — fail as shipped, suppress with "cost knob":**

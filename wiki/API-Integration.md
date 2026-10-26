@@ -1,8 +1,8 @@
-How another system talks to the portal: the same HTTP API the web app uses, called with a service user's token. The contract is [openapi.yaml](https://github.com/FNTIO/aws-infrastructure-client/blob/main/packages/infra-client/openapi.yaml) (OpenAPI 3.1, shipped in the package); this page is the walkthrough around it.
+How another system talks to the portal: the same HTTP API the web app uses, called with a service user's token. A tool that should act as one person, with only some of their access, uses a [[personal access token|Personal Access Tokens]] instead. The contract is [openapi.yaml](https://github.com/FNTIO/aws-infrastructure-client/blob/main/packages/infra-client/openapi.yaml) (OpenAPI 3.1, shipped in the package); this page is the walkthrough around it.
 
 ## 1. Create a service user
 
-In the portal, as an admin: Users → Service users → **Add service user**. Copy the client id and the client secret; the secret is shown once. Every service user is an admin, so it may call every route. If the system should also obtain AWS credentials, grant it roles the way you would a person (Users → the service user → Roles).
+In the portal, as an admin: Users → Service users → **Add service user**, and tick its scopes: `aws` to list its roles and get AWS credentials, `network` to enroll machines on the private network, `shares` to share their ports, `admin.read.all` to read every administration route, `admin.write.all` for every administration route including changes (it implies the reads). Copy the client id and the client secret; the secret is shown once. Grant it roles and network resources the way you would a person (Users → the service user → Roles / Network resources). The scopes can be changed on its panel later and hold from its next call. The headless vend-and-join sequence for a machine is on the [[Service users runbook|Runbooks-Service-Users]].
 
 ## 2. Get a token
 
@@ -22,7 +22,7 @@ The answer carries an `access_token` valid for one hour. Request a new one when 
 curl -H "Authorization: Bearer $TOKEN" https://<portal host>/api/admin/users
 ```
 
-Every route is under `https://<portal host>/api/`. A system that only needs AWS credentials calls `POST /api/credentials` with `{ "accountNumber": "…", "role": "…" }` for a role granted to it and receives keys for that role's session length.
+Every route is under `https://<portal host>/api/`. A system that only needs AWS credentials calls `POST /api/credentials` with `{ "accountNumber": "…", "role": "…" }` for a role granted to it and receives keys for that role's session length. A route outside the service user's scopes answers `403` with `code: "TOKEN_SCOPE"`; the `/admin` routes need `admin.read.all` (reads) or `admin.write.all` (everything). An `admin.write.all` service user manages users and service users like a human admin.
 
 ## What to expect
 
