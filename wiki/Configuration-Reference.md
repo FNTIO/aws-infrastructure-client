@@ -47,7 +47,7 @@ The first-auth factors the sign-in page offers. Changeable later. The block belo
 | `password` | optional; `false` fails at synth | Password sign-in. Cognito requires it, so it is always on. |
 | `passkey` | optional | WebAuthn: Touch ID, Face ID, Windows Hello, security keys. Requires the `web` block, because passkeys bind to the custom web domain (synth check). |
 | `emailOtp` | optional | Passwordless one-time code by email. |
-| `mfa` | optional (`"optional"` or `"required"`); mandatory when password is the only first factor | TOTP second factor for password sign-ins. Passwordless factors are never challenged. A password-only pool must set it (synth check). |
+| `mfa` | optional (`"optional"` or `"required"`); mandatory when password is the only first factor | TOTP second factor for password sign-ins. Passkey and MFA coexist on the pool, not on one account: a user who enrolls an authenticator signs in with password + code only — Cognito stops offering passkey and email code to that user until the authenticator is turned off (self-service in the Authenticator dialog, or the admin's Reset MFA). `"required"` therefore removes passkey and email code for everyone. A password-only pool must set it (synth check). |
 | `threatProtection` | optional | Cognito threat protection in full-function mode: blocks password sign-ins with known-leaked passwords, allows Medium-risk sign-ins, and steps High-risk sign-ins up to MFA (if the user enrolled; the user is emailed when `email` is set). Needs `mfa` set (synth check). PLUS feature plan, about $0.02 per monthly active user. On an attempt Cognito applies MFA to, only the password is offered — [[Runbooks-Users]], "Only the password is offered". |
 | `federation` | optional | Sign in with the customer's own identity provider (OIDC), one entry per provider — see the table below. Local methods stay available underneath (Cognito requires password). Runbook: [Federated sign-in (SSO)](Runbooks-Users#federated-sign-in-sso). |
 
@@ -158,6 +158,17 @@ How every user's dashboard is laid out. Optional; absent = `auto`. Set here, lik
 | Field | Required | What it controls |
 | --- | --- | --- |
 | `layout` | optional, default `auto` | `auto`: a user gets Main / Favorites / Recent and the search once they hold an account an admin took off the Main section, and the plain list until then. `sections`: everyone gets the sections. `plain`: nobody does (synth check). The per-account **Show in the Main section** flag still decides what sits in Main. |
+
+### `roleSessionName`
+
+How a vended role's STS session is named — what the target account's console and CloudTrail show as the federated user (`<Role>/<session name>`) and what `aws sts get-caller-identity` returns. Optional; a single string, not a block.
+
+| Value | What it does |
+| --- | --- |
+| `"userId"` (default) | `creds-<Cognito sub>`: the session names the user's opaque id; an Infra Client admin maps it to a person through the Cognito user pool or the Activity page. Every deployment's behaviour before this setting existed. |
+| `"email"` | The caller's email (a personal access token's owner's email, a service user's registry name), so a team in the target account can see who made a change without asking an admin. Characters STS does not allow in a session name become `_`; an empty or over-long name falls back to `creds-<sub>`. The admin Roles page's session-length Test follows the same policy. |
+
+Any other value fails synth. Role trust is unchanged either way: the signed token pins the caller's sub and no trust policy conditions on the session name. Sessions vended before a switch keep their old name in CloudTrail.
 
 ### `network`
 

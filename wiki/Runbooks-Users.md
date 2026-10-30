@@ -139,6 +139,16 @@ curl -s -X PUT "<ApiUrl>admin/accounts/<ACCT>/roles/SandboxReadOnly/grants/<sub>
   -H "Authorization: Bearer $JWT"
 ```
 
+## Passkey or email code disappeared for one user
+
+Check whether the user has an authenticator (TOTP) enrolled before anything else. Cognito offers a user with MFA configured the password alone in choice-based sign-in — passkey and email code are withheld for that user on every device, not just the one they enrolled on. This is Cognito's rule, not the portal's; the Authenticator dialog says so when they turn it on.
+
+```bash
+aws cognito-idp admin-get-user --user-pool-id <pool-id> --username <email> --query 'UserMFASettingList'
+```
+
+`["SOFTWARE_TOKEN_MFA"]` means enrolled. The user picks one lane: keep the authenticator and sign in with password + code, or turn it off under **Authenticator (MFA)** in the profile menu (or an admin uses **Reset MFA** on the user panel) and the other methods come back on the next sign-in. If nothing is enrolled, read on.
+
 ## Only the password is offered
 
 The sign-in page lists what Cognito offers for that attempt. With `loginMethods.threatProtection` on, Cognito scores every attempt; on an attempt it applies an MFA action to, choice-based sign-in offers only the password — passkey and email code disappear for that attempt, even for a user who has both. The package allows Medium risk (a new network) and applies "MFA if configured" only at High, so this is rare; when a user reports it:

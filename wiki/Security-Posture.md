@@ -262,7 +262,7 @@ locks the by-construction rows down.
 | EC2.2, .6, .15, .18, .19 | default SG stripped (explicit, not the cdk.json flag), REJECT-only flow logs (3 months), subnets never auto-assign public IPs (tasks request theirs), only 443 open to the internet |
 | ECS.3, .4, .8, .9, .10, .18 | Fargate task definitions: no host PID, non-privileged, no credential env vars, awslogs on every container, latest platform, EFS in-transit encryption |
 | EFS.1, .3, .4, .8 | encrypted state file system, per-site access points with a root directory and POSIX user |
-| ELB.1, .4, .12, .13, .17, .18 | the Headscale ALB has ONE listener (443, `TLS13-1-2-Res-2021-06`, no port-80 redirect any more), drops invalid headers, defensive desync mode, two AZs |
+| ELB.1, .4, .12, .13, .17, .18 | the Headscale ALB has ONE listener (443, `TLS13-1-2-Res-PQ-2025-09`, no port-80 redirect any more), drops invalid headers, defensive desync mode, two AZs |
 | S3.9, CloudFront.5 | since 0.5.0: the web, issuer and plugin-assets buckets send server-access logs, and both distributions standard logs, into `DataStack`'s `AccessLogsBucket` (90-day expiry, kept on teardown with `prod`). That bucket is the one that logs nowhere: AWS's own S3.9 text says to suppress its finding, and CloudFront's logging writes with an ACL grant, so an S3.12 finding on it is suppressed the same way |
 | KMS.1, .2, .3, .5; Lambda.1, .2, .5; S3.2, .3, .5, .6, .8, .12, .13; SNS.4; IAM.1, .21; CloudFormation.4 | key-scoped `kms:Sign` only, named principals, Node 22, VPC Lambdas in two AZs, private bucket with SSL-only policy + a lifecycle rule, SSL-only topic, no customer managed policies, CDK's CloudFormation execution role |
 

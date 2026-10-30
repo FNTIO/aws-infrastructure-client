@@ -146,9 +146,23 @@ the site will never return.
 
 Connector hygiene is automatic: a redeployed connector enrolls as a new
 node, and the reconciler deletes its offline predecessor once a trusted
-replacement for the same account is online for 24h+ (logged as
-`prunedConnectors`). An account's ONLY connector is never deleted — it stays
-in the stale list and the alarm, so an outage is seen rather than tidied away.
+replacement for the same account and VPC is online for 24h+ (logged as
+`prunedConnectors`). Until then the predecessor is listed as
+`supersededConnectors`, not as stale, so a routine task replacement (Fargate
+retirement, a redeploy) does not raise the `StaleConnectors` alarm. An
+account's ONLY connector is never deleted — it stays in the stale list and the
+alarm, so an outage is seen rather than tidied away.
+
+Relay map (DERP) failures heal the same way. Each control-server start saves
+the live relay map to the site's EFS folder (`derp-fallback.yaml`), and
+Headscale falls back to that copy when its daily refresh cannot download the
+map, so nodes keep their relays. A connector that reports "could not connect
+to the ... relay server" for about five minutes fails its ECS health check
+and is replaced; its routes auto-approve as for any redeploy. When
+NetworkStack has an alert topic, the `DerpMapLoadFailed` alarm fires on
+every failed load (its OK only means no new failure was logged): if the site's log shows the saved copy is missing too (a site whose
+first start could not download the map), force a new deployment of its
+`headscale-<site>` service once the URL loads again.
 
 No admin port is exposed; admin operations go through ECS Exec — per SITE
 (each site is its own Fargate service, `headscale-<site>`):

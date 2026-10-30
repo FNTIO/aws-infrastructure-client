@@ -113,7 +113,7 @@ Symptom-first answers for the failures seen so far: issues reported from consume
 ### Connected, but a resource times out
 
 - Symptom: the pill is green and a host does not answer.
-- Cause: rules are still syncing (up to 5 minutes, and the first-ever connection waits for the next reconciler pass), you hold no grant, or the resource's security group does not allow the connector.
+- Cause: rules are still syncing (a change to your access takes up to 5 minutes; a first connection to a site starts a pass at once and takes seconds), you hold no grant, or the resource's security group does not allow the connector.
 - Fix: wait out the 5 minutes, then use the resource dialog's "Test connection", which separates vpn-down from no-answer. Same section as above.
 
 ### "The network rejected the connection key"

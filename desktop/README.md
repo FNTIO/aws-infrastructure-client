@@ -639,7 +639,14 @@ failed checks are retried quietly and never shown.
   own. It only announces: "Update <version> available · Open download page" in
   the tray and a toast; the row opens the Release page. Switch
   `updater.js` to the macOS behaviour once the `.exe` is signed.
-- **Dev runs** (`npm start`) never touch the updater.
+- **Check for Updates…** sits below **About Infra Client** in the macOS app
+  menu, in the **Help** menu on Windows and Linux, and in the tray while no
+  update row is shown. It checks the feed at once and always answers in a
+  dialog: the latest version, an update (a restart on macOS once downloaded,
+  the Release page on Windows) or the error. A check already running is
+  shared, not sent twice, and the toast for that update is left out.
+- **Dev runs** (`npm start`) never touch the updater; Check for Updates… says
+  so.
 
 A rehearsal (manual `desktop-build` run) also uploads `latest-mac.yml`; it
 is harmless there, since only Release assets are ever polled.

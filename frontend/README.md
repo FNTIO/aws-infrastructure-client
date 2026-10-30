@@ -322,12 +322,16 @@ minting; SES still sends the code emails.
   risk levels for a known device on a new network.
 - **"Only your password is offered" hint**: when the device remembers a passkey or email-code
   sign-in for the typed email but Cognito's `AvailableChallenges` lacks it while listing the
-  password, the chooser and the password screen show a one-line notice. That is Cognito
-  applying an MFA action to the attempt (threat protection; the package allows Medium risk and
-  steps up only at High — wiki Runbooks-Users, "Only the password is offered"); choice-based
-  sign-in then offers the password alone. The notice relies on the remembered method on
-  purpose: a user with no passkey on a pool without email code also sees a password-only
-  list, and must not be told it is unusual.
+  password, the chooser and the password screen show a one-line notice. Two causes, and the
+  page can't tell them apart before auth, so the copy names both: Cognito applying an MFA
+  action to the attempt (threat protection; the package allows Medium risk and steps up only
+  at High — wiki Runbooks-Users, "Only the password is offered"), or the user having enrolled
+  an authenticator, after which Cognito offers that user the password alone on every device
+  (wiki Runbooks-Users, "Passkey or email code disappeared for one user"). The Authenticator
+  dialog re-points this device's remembered method at password on enrollment, so the notice is
+  only ever seen on other devices. It relies on the remembered method on purpose: a user with
+  no passkey on a pool without email code also sees a password-only list, and must not be told
+  it is unusual.
 - **Federated sign-in (SSO)** (`federation.ts`; `/auth/callback` is the login page's `sso` screen): with
   `config.json.federation` set, the email screen leads with one "Sign in with …" button per
   provider and folds the local form behind "Sign in another way" (it opens by itself for an

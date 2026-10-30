@@ -18,7 +18,7 @@ Source: [Sites](Private-Network#sites--per-site-control-planes).
 | `ConnectorStack` | the VPC's account, one per VPC | `TailnetConnector` (a Fargate task that mints a key at boot, joins its site as `connector-<account>`, or `connector-<account>-<name>` for an account's named second VPC, and advertises its routes), that VPC's `SgManager` (it converges only its own VPC's groups and answers `other-vpc` for the rest), and a `TailnetResolver` per site |
 | `TestbedStack` | hub account, FNTIO-only | A temporary acceptance test bed (nginx and Aurora) with its own SG-manager and resolver |
 | Key minter (`keyminter.ts`) | the NetworkStack VPC | The only code that talks to Headscale's admin API, over Cloud Map. `deviceHandler` mints a single-use 30-minute key under `u-<sub>` for a given site and is invocable only by the vending API role. `connectorHandler` (one per site) mints a 5-minute machine key under the `infra` user and ignores its event, so a connector account chooses nothing; which site it joins is decided by which minter it may invoke |
-| ACL reconciler (`acl-reconciler.ts`) | the NetworkStack VPC, every 5 minutes and on `POST /admin/network/sync` | Renders effective resource access into one Headscale policy per site; auto-approves private routes of `infra`-owned connectors; detects stale connectors; expires user devices offline 7+ days; prunes replaced connectors; writes the `__reconciler-status__` sentinel with topology |
+| ACL reconciler (`acl-reconciler.ts`) | the NetworkStack VPC, every 5 minutes, on `POST /admin/network/sync` and when the device minter creates a user's Headscale user (first enrollment in a site) | Renders effective resource access into one Headscale policy per site; auto-approves private routes of `infra`-owned connectors; detects stale connectors; expires user devices offline 7+ days; prunes replaced connectors; writes the `__reconciler-status__` sentinel with topology |
 | SG-manager (`sg-manager.ts`) | each connector account | Converges a resource's security group to "allow tcp on the registered ports from the connector SG"; only touches rules carrying the managed marker; its mutating IAM is pinned to the connector's VPC |
 | tailnet-resolver (`resolver.ts`) | each connector VPC, named per site | Names in, IPv4 addresses out; the only path that sees another account's private hosted zones |
 | Desktop `tailnet.js` | the user's machine | Drives the locally installed Tailscale CLI |
@@ -46,7 +46,7 @@ Detail: [Resource catalog and per-resource access](Private-Network#resource-cata
 
 ## Dev shares
 
-With `network.devShares.enabled`, a user can share one local port on their laptop with named users or groups on the same site for a bounded time — the "show a teammate my dev server" case, without a staging deploy or a public tunnel. A share is a grant target like a resource (`share#<id>` rows, effective access from the [[Access Model]]) plus a definition row on the fixed `sharedef` principal. Every share row carries the share's expiry (the access model treats an expired row as inactive whoever holds it) and a DynamoDB TTL. The reconciler renders it as `src: u-<grantee>@`, `dst: <owner tailnet IPv4>/32:<port>` from the owner's enrolled devices, and the API kicks a pass on create and stop. The desktop app runs `tailscale serve --http=<port>` so a dev server bound to localhost is reachable; every path that ends the tunnel also ends the serves. Plain HTTP over the encrypted tunnel (Headscale cannot issue the certificate `--https` needs). Owner or admin stops it; grantees get a `SHARE` revocation notice. `GET /network/shares/directory` is the one directory read open to non-admins. Joining a site needs no VPC grant there (the device key is minted for any configured site; the policy decides what a device reaches), so a share can be the only thing a user holds on a site: the Network page groups by network with one Connect per site (a share alone earns a site its group), the desktop pill's chooser lists every site, and a first-time joiner is admitted on the next reconciler pass.
+With `network.devShares.enabled`, a user can share one local port on their laptop with named users or groups on the same site for a bounded time — the "show a teammate my dev server" case, without a staging deploy or a public tunnel. A share is a grant target like a resource (`share#<id>` rows, effective access from the [[Access Model]]) plus a definition row on the fixed `sharedef` principal. Every share row carries the share's expiry (the access model treats an expired row as inactive whoever holds it) and a DynamoDB TTL. The reconciler renders it as `src: u-<grantee>@`, `dst: <owner tailnet IPv4>/32:<port>` from the owner's enrolled devices, and the API kicks a pass on create and stop. The desktop app runs `tailscale serve --http=<port>` so a dev server bound to localhost is reachable; every path that ends the tunnel also ends the serves. Plain HTTP over the encrypted tunnel (Headscale cannot issue the certificate `--https` needs). Owner or admin stops it; grantees get a `SHARE` revocation notice. `GET /network/shares/directory` is the one directory read open to non-admins. Joining a site needs no VPC grant there (the device key is minted for any configured site; the policy decides what a device reaches), so a share can be the only thing a user holds on a site: the Network page groups by network with one Connect per site (a share alone earns a site its group), the desktop pill's chooser lists every site, and a first-time joiner is admitted by the pass their first enrollment starts.
 
 A share can be **bound to one device** (`device`, the device's name on the site): the rule then targets only the IPv4s of the owner's node answering to that name (its DNS name or the hostname it enrolled with), re-resolved on every pass, so a machine that re-enrolls under the same name keeps its shares. A bound share is always open to the owner's own other devices (`src: u-<owner>@`), may name no grantees, and the one-share-per-port rule applies per device. A requested duration above `maxDurationHours` is clamped to it. One user holds at most `maxActiveSharesPerOwner` live shares (default 10).
 
@@ -241,8 +241,9 @@ admin-approved route of its account's `connector-<account>` node**.
   ENTIRE previous policy live (revocations included) until a pass succeeds —
   that's what the ReconcilerErrors alarm guards. The reconciler therefore
   filters out anything Headscale would reject: grants to users who never
-  enrolled a device (`usersNotEnrolled` in the log; they get their rules on
-  the pass after first connect), rows with no valid ports, and malformed
+  enrolled a device (`usersNotEnrolled` in the log; the device minter starts
+  a pass when it creates a user's Headscale user, so the rules follow within
+  seconds of the first connect), rows with no valid ports, and malformed
   expiries (treated as expired, never permanent).
 - Known limit (accepted): rare partial-failure races (delete-resource
   cascade vs concurrent group edits, GSI lag) can leave orphan `resource#`
@@ -273,9 +274,12 @@ admin-approved route of its account's `connector-<account>` node**.
   "Follows DNS" / "DNS unresolved". Also: auto-approval of a connector's private
   advertised routes when the node is owned by the `infra` machine user (the
   identity only the connector minter can create — impostor names get
-  nothing), stale-connector detection (OFFLINE 15+ min with approved routes →
+  nothing), stale-connector detection (OFFLINE 15+ min with approved routes
+  and no trusted online connector in the same account and VPC →
   `StaleConnectors` EMF metric → alarm; recovery = force-new-deployment, the
-  replacement's routes auto-approve), device-key hygiene (USER devices
+  replacement's routes auto-approve; a node a live replacement has superseded
+  is logged as `supersededConnectors` instead, outside the metric, until it is
+  pruned), device-key hygiene (USER devices
   offline 7+ days are expired via `POST /node/{id}/expire` — must re-Connect
   in the app; never `infra`/connector nodes, and idle-based on purpose:
   Headscale has no future-expiry setter, and enrollment-age expiry would

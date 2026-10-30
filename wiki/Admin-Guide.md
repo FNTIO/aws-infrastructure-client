@@ -47,6 +47,7 @@ The admin Accounts page is the catalog every grant refers to.
 
 The Users page is the Cognito directory, so a user with no access still appears.
 
+- The list is sorted by email A to Z. **Sort** switches it to email Z to A or to last seen (most recent first, or longest ago first; someone who never signed in counts as the oldest). It applies after search and filters, and a reload starts at A to Z again.
 - **Create user** sends the invitation email (a set-your-password link, valid 7 days) and opens the new user's panel, so you can grant access right away; no link is shown while the email goes out. Switch **Send invitation email** off to create the user without any email: the panel then shows the **sign-up link** and the app's address to copy, and that link is the only invitation. Anyone holding the link can set that user's password, so send it privately. While the invite is open, the user's panel offers **Copy sign-up link** (a fresh link — the emailed one and any earlier copy stop working) and **Send invite email** (which likewise replaces a copied link). Bulk invites take up to 50 addresses at once and report per address; with the email off, the result list carries the app's address and a copy button per created user.
 - **Admin** makes or unmakes an admin; the last admin cannot be demoted.
 - The row's panel shows the user's roles and network resources and how each is held: directly, through named groups, or both, plus when they were last seen.

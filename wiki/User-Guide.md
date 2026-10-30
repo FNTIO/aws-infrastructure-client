@@ -50,7 +50,7 @@ If your deployment runs the private network, the Network page lists the database
 
 1. **First time only:** install Tailscale from tailscale.com. On macOS, open it once and allow the VPN configuration. No Tailscale account is needed; your portal login is your identity.
 2. In the desktop app, click **Connect network** (the pill at the bottom of the sidebar). The app mints a one-time key and joins the network for you.
-3. The first connection can take up to five minutes before your access rules are in place; later changes to your access take at most five minutes.
+3. On your first connection to a network your access rules are in place within seconds; later changes to your access take at most five minutes.
 4. **Test connection** on a resource tells you whether it answers through the tunnel.
 
 Your machine is on one network at a time. Deployments with several sites show which one you are on, and switching is a click in the pill or the tray. Access to a resource is requested and granted the same way as a role.
