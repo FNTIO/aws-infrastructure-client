@@ -68,7 +68,14 @@ loading that deployment's real web app in its own isolated session.
 - **Background session (hide-to-tray).** Closing the window or Cmd+Q *hides*
   to the menu bar: hidden tabs keep renewing (background throttling is
   disabled so timers stay punctual) until Cognito's 12h refresh-token wall,
-  when the page purges the profiles. The page moves to the sign-in screen
+  when the page purges the profiles. Throttling off also means Chromium keeps
+  rendering a hidden view at full frame rate, which once held the GPU process
+  at ~20% CPU in the tray (#87): `visibility.js` therefore pauses every CSS
+  animation in a view nobody can see (window hidden or minimized, or an
+  inactive tab, which `layout()` parks at 0×0) with inserted CSS, re-applied
+  on each document load, and sends `infra:visibility` so the page stops its
+  own frame loops (the network map's canvas). The active tab of a shown window
+  gets the CSS removed and `true`. Timers are untouched either way. The page moves to the sign-in screen
   *first* and asks for the purge only once that navigation has settled: the
   purge drops the VPN tunnel, and a sign-in screen still loading through that
   interface change used to fail and strand a signed-out page (frontend
@@ -191,9 +198,10 @@ Notifications → Infra Client.
 
 - **Raised by the shell itself** (no page involved): credentials
   expiring/expired (above, audible on purpose), the first hide-to-tray
-  notice, and **VPN disconnected** — the tailnet stepped from connected to
-  stopped/needs-login without the shell having run a login, switch or logout
-  itself (node expired server-side, daemon logged out). One per 5 minutes,
+  notice, an update ready to install (see "Self-update"), and **VPN
+  disconnected** — the tailnet stepped from connected to stopped/needs-login
+  without the shell having run a login, switch or logout itself (node expired
+  server-side, daemon logged out). One per 5 minutes,
   named after the site the tunnel was on ("The <site> site dropped"),
   generic when no backend could name it; clicking opens `/resources` in that
   backend's tab. A personal tailnet dropping never toasts.
@@ -441,9 +449,9 @@ Linux needs a packaged build for the `.desktop` handler. A link into a
 running app arrives as macOS `open-url` or, on Windows/Linux, as an
 argument of the second instance the single-instance lock hands over; a
 link received during startup is queued until the saved backends are
-restored. CI builds macOS (signed, `desktop-build.yml`) and Windows
-(unsigned, the `windows` job of `release.yml`); link handling is verified
-on macOS only. Test a build from a terminal:
+restored. CI builds macOS (`desktop-build.yml`) and Windows (the `windows`
+job of `release.yml`), both signed; link handling is verified on macOS
+only. Test a build from a terminal:
 
 ```bash
 open "infraclient://<host>/accounts"
@@ -467,6 +475,7 @@ unchanged.
 | `shell.html` / `shell.js` | Outer chrome: tab bar + first-run connect; rasterizes tray artwork |
 | `tray.js` | Menu-bar freshness indicator + pre-expiry notifications |
 | `tailnet.js` | Drives the locally installed Tailscale CLI (Epic 4) |
+| `visibility.js` | Pauses CSS animations and signals hidden/visible to views nobody can see (tray, minimized, inactive tab) |
 | `scripts/dist.js` | Packages the ONE public product binary (constants; no deployment config) |
 
 ## Run it (development)
@@ -533,24 +542,45 @@ time, giving each client's install its own data folder.
 **Unsigned macOS builds** (no Apple cert in the keychain) work — signing is
 skipped. Fine on the build machine; on *other* Macs the app is blocked until
 "Open Anyway" (internal testing only), and mac passkeys and macOS
-self-update need a signed build. Windows builds are unsigned by design for
-now; see "Windows installer" below.
+self-update need a signed build. A local Windows build is unsigned; signing
+happens only in CI, see "Windows installer" below.
 
 ## Windows installer
 
 The `windows` job of `release.yml` builds `infra-client-<version>-x64.exe`
 (NSIS, `npm run dist -- --win` on a Windows runner) and attaches it to the
-Release next to the macOS files. It is **unsigned for now**: a Windows
-code-signing certificate has to live in a cloud signing service (Azure
-Trusted Signing is the practical one: an Azure account, a one-time
-organisation validation, then a few workflow lines), and whether to pay for
-that is still an open decision.
+Release next to the macOS files. Releases after 0.7.0 are **signed** with
+FNTIO's certificate in Azure Artifact Signing; 0.7.0 and earlier are unsigned.
 
-**First launch of an unsigned build.** Running the downloaded installer
-opens SmartScreen's blue "Windows protected your PC" screen with no obvious
-way forward. Click **More info**, then **Run anyway**. That happens once per
-downloaded file; the installed app starts normally afterwards. Machines
-whose policy hides the Run anyway button need a signed installer.
+**Nothing per client**, as on macOS: FNTIO's one signing identity signs the
+one public installer. No certificate file exists anywhere: electron-builder
+hands each file to Azure through the TrustedSigning PowerShell module, and
+the certificate (short-lived, renewed by Azure every few days) never leaves
+Azure. Every signature carries a timestamp, so it stays valid after the
+certificate behind it expires.
+
+**How CI gets in.** The job runs in the `windows-signing` GitHub
+environment and logs in to Azure with GitHub's OIDC token; Azure trusts
+that token only for this repository and that environment, and the
+environment's branch rules decide which refs may use it. It holds three
+secrets (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, the
+ids of the login identity, none of them a credential) and four variables
+(`AZURE_SIGNING_ENDPOINT`, `AZURE_SIGNING_ACCOUNT`, `AZURE_SIGNING_PROFILE`,
+`WINDOWS_PUBLISHER_NAME`) that reach electron-builder as
+`win.azureSignOptions` on the command line, so package.json stays free of
+deployment values. A tag build without them fails; a manual run without them
+builds unsigned. After signing, the job checks that the installer and the
+app executable carry a valid, timestamped signature from
+`WINDOWS_PUBLISHER_NAME`.
+
+**First launch.** A signed installer names its publisher in Windows'
+prompts. SmartScreen may still show its blue "Windows protected your PC"
+screen until the signing identity has built download reputation; then
+**More info**, then **Run anyway** gets past it, once per downloaded file.
+Unsigned builds (0.7.0 and earlier) always show that screen, and machines
+whose policy hides the Run anyway button need a signed installer. A signed
+install also updates itself (see "Self-update" under Publishing); an
+unsigned one only announces updates and is replaced by hand once.
 
 Windows Hello passkeys work in this build; see "Passkeys (per platform)".
 
@@ -608,7 +638,7 @@ FNTIO/aws-infrastructure-client (wiki: Releasing): `release.yml` in the
 private source repo runs on a `v<version>` tag there, calls
 `desktop-build.yml` with `release: true` (signing mandatory, installer named
 `infra-client-<version>-<arch>.dmg`) and attaches the dmg + zip to the
-Release next to the package tarballs and the unsigned Windows `.exe` from
+Release next to the package tarballs and the signed Windows `.exe` from
 its own `windows` job (see "Windows installer"). The
 desktop version in package.json equals the package version from 0.1.14 on;
 the workflow refuses a release where the two differ.
@@ -629,22 +659,44 @@ the `appId`: a rename silently ends updates for every installed app, since
 failed checks are retried quietly and never shown.
 
 - **macOS:** the update downloads in the background. When it is ready the tray
-  gets an "Update <version> · Restart to install" row and a toast; the row runs
-  the same teardown as Quit (credentials removed, tunnel dropped) and the
-  installer relaunches the new version. A plain tray Quit installs it too, so
-  the next launch is already current. Needs a signed build; an unsigned local
-  build only logs an error.
-- **Windows:** the installer is unsigned (see "Windows installer"), so the app
-  cannot verify a download's publisher and never fetches or runs one on its
-  own. It only announces: "Update <version> available · Open download page" in
-  the tray and a toast; the row opens the Release page. Switch
-  `updater.js` to the macOS behaviour once the `.exe` is signed.
+  gets an "Update <version> · Restart to install" row and a notification, whose
+  click asks "Restart now / Later"; the row runs the same teardown as Quit
+  (credentials removed, tunnel dropped) and the installer relaunches the new
+  version. A plain tray Quit installs it too, so the next launch is already
+  current. Needs a signed build; an unsigned local build logs an error and
+  cannot install, though it still shows the row and one notification.
+- **Windows, signed install (a release after 0.7.0):** updates like macOS.
+  The installer downloads in the background; electron-updater checks its
+  Authenticode signature against `publisherName` in the installed app's
+  `app-update.yml` (the signed build writes `WINDOWS_PUBLISHER_NAME` there)
+  and refuses a mismatch (`ERR_UPDATER_INVALID_SIGNATURE`: nothing is
+  announced, Check for Updates… shows the error). Once downloaded, the same
+  tray row and notification appear; "Restart now" runs the Quit teardown and
+  then the one-click installer silently (per-user, no elevation prompt) and
+  relaunches the app; a plain tray Quit installs it silently without
+  relaunching.
+- **Windows, unsigned install (0.7.0 and earlier):** the app never fetches or
+  runs an installer on its own, because without a publisher name
+  electron-updater would install a download unchecked. It only announces:
+  "Update <version> available · Open download page" in the tray and a
+  notification; both open the Release page. Install the next signed release
+  by hand once (settings are kept); from then on the app updates itself.
+  `updater.js` reads the gate through electron-updater's own config loader,
+  the same field its signature check reads; a test pins the two together.
 - **Check for Updates…** sits below **About Infra Client** in the macOS app
   menu, in the **Help** menu on Windows and Linux, and in the tray while no
   update row is shown. It checks the feed at once and always answers in a
-  dialog: the latest version, an update (a restart on macOS once downloaded,
-  the Release page on Windows) or the error. A check already running is
-  shared, not sent twice, and the toast for that update is left out.
+  dialog: the latest version, an update (a restart once downloaded, or the
+  Release page on an unsigned Windows install) or the error. A check already
+  running is shared, not sent twice, and the notification for that update
+  waits a day.
+- **When the notification appears:** a download can finish while nobody is at
+  the machine, so it waits until the screen is unlocked and the person has been
+  active in the last minute. It then repeats once a day until the update is
+  installed; a relaunch starts that day over, so it can show once more about a
+  minute after launch. A newer version notifies at once, and a version the
+  macOS updater rejected does not repeat. A Focus mode can still hide it; the
+  tray row stays either way.
 - **Dev runs** (`npm start`) never touch the updater; Check for Updates… says
   so.
 
@@ -684,6 +736,20 @@ the passkey appears in the list (and in Cognito). Sign out → the chooser
 offers "Passkey"; using it opens Hello and lands in the app. Confirm a
 browser on the same machine sees the same passkey, and deleting it removes
 it from the sign-in options.
+
+**Windows self-update verification checklist** (needs a real Windows 10/11
+machine and two signed releases, N and N+1): install release N from its
+`.exe` and sign in; once N+1 is on the Release page, wait for the scheduled
+check (one minute after launch, then every six hours) or use Help → Check
+for Updates…: the tray gets "Update N+1 · Restart to install" and the
+notification arrives while you are at the machine. Click Restart now: the
+app quits, installs silently with no UAC prompt and relaunches as N+1
+(About shows the version). Repeat with a tray Quit instead: the update
+installs, the app stays closed, and the next launch is N+1. Finally
+confirm the refusal path on a build whose `app-update.yml` names the
+publisher but whose feed serves an unsigned or re-signed `.exe`: Check for
+Updates… reports "not signed by the application owner" and no tray row
+appears.
 
 ## Dependency pins & overrides
 

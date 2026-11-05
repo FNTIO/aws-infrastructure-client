@@ -99,7 +99,7 @@ Network stacks are deployed by hand, never from CI. Concepts are on [[Private Ne
 | --- | --- | --- |
 | [Package (distribution)](https://github.com/FNTIO/aws-infrastructure-client/blob/main/desktop/README.md#package-distribution) | `npm run dist` builds the one public binary; where the app name, bundle id and runtime strings come from; what unsigned builds can and cannot do | recurring |
 | [Code signing & notarization (macOS)](https://github.com/FNTIO/aws-infrastructure-client/blob/main/desktop/README.md#code-signing--notarization-macos) | How the `desktop-build` workflow signs, notarizes and Gatekeeper-verifies, why it is pinned to `macos-15`, the one-time Apple enrollment behind the five repository secrets, and adding those secrets to a repository that cuts releases | one-time (setup) |
-| [Windows installer](https://github.com/FNTIO/aws-infrastructure-client/blob/main/desktop/README.md#windows-installer) | The unsigned Windows build on every Release, what a user clicks through on first launch, and where signing stands | recurring |
+| [Windows installer](https://github.com/FNTIO/aws-infrastructure-client/blob/main/desktop/README.md#windows-installer) | How the Windows installer is signed, what a user may click through on first launch | recurring |
 | [Passkeys (per platform)](https://github.com/FNTIO/aws-infrastructure-client/blob/main/desktop/README.md#passkeys-per-platform) | Passkey support on Windows, signed macOS builds and Linux, plus the Windows verification checklist | |
 
 ## Frontend

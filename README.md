@@ -35,10 +35,9 @@ Download the installer for your platform from the latest
 [Release](https://github.com/FNTIO/aws-infrastructure-client/releases/latest):
 `infra-client-<version>-arm64.dmg` for macOS (signed and notarized; the app
 updates itself from this repository's Releases) or
-`infra-client-<version>-x64.exe` for Windows (unsigned for now, so the first
-launch is a SmartScreen click-through; the app announces new versions and
-opens the download page). One binary serves every deployment: on first
-launch you enter your portal's URL.
+`infra-client-<version>-x64.exe` for Windows (signed from the release after
+0.7.0 on; the app announces new versions and opens the download page). One
+binary serves every deployment: on first launch you enter your portal's URL.
 
 ## What is public
 

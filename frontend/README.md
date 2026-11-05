@@ -695,6 +695,17 @@ downloads `GET /api/admin/access-report` (current state, one row per person × t
 
 ## Notes
 
+- **Frame loops and the desktop shell (2026-11-04, #87):** the desktop app
+  keeps background throttling off so renewal timers stay punctual, which also
+  keeps `document.visibilityState` at `visible` in a hidden window or an
+  inactive tab. `DesktopBridgeService.visible` (a signal; always true in a
+  browser) is the shell's word on whether anyone can see the page: a
+  `requestAnimationFrame` loop must not re-arm while it is false (the
+  network map does this) and should repaint once when it turns true. The
+  shell pauses CSS animations in such views itself. The glass glow behind
+  the shell, the login page and the theme wizard is a still gradient on
+  purpose: a layer moving under the panels' `backdrop-filter: blur(42px)`
+  made the GPU recompute the blur every frame, even in a visible window.
 - **Role card icons (2026-08-24):** the card's top-left icon shows what the
   role lets you do — admin-picked on the Add-role form's "Card icon" field
   from a curated 8-token set (`shared/util/role-icons.ts`, stored on the
