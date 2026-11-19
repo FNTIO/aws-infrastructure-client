@@ -151,6 +151,15 @@ The vending API's stage throttle: the deployment-wide ceiling on requests per se
 | `rateLimit` | optional, default 100 | Sustained requests per second for the whole stage (1 to 10000). |
 | `burstLimit` | optional, default 200 | Requests the stage absorbs at once above the sustained rate (1 to 5000). |
 
+### `apiCloudWatchRole`
+
+Whether `CredsStack` sets the account-wide API Gateway CloudWatch Logs role (the `AWS::ApiGateway::Account` resource) that the vending API's stage logging needs. AWS keeps one such setting per region per account, so only one stack should own it. Also on `CredsStackProps`, for a deployment that creates `CredsStack` without `addAccessPortal`.
+
+| Value | What it does |
+| --- | --- |
+| omitted or `true` | `CredsStack` ships the role and the account setting, whatever your `cdk.json` says about `@aws-cdk/aws-apigateway:disableCloudWatchRole` (the 0.1.3 fix). |
+| `false` | `CredsStack` ships neither. Use it only when another stack of yours sets that role: the stage still logs, so the deploy fails with "CloudWatch Logs role ARN must be set in account settings" until it is set. Switching a live deployment to `false` keeps the current setting and the old role in place (both are retained). The setting keeps pointing at that retained role until your own `AWS::ApiGateway::Account` resource is next created or changed, because CloudFormation does not re-apply an unchanged resource; run `aws apigateway get-account` and delete the retained role only once it names yours. |
+
 ### `dashboard`
 
 How every user's dashboard is laid out. Optional; absent = `auto`. Set here, like every deployment-wide choice; there is no switch on the admin Accounts page. See [[Admin Guide]], "Dashboard layout".

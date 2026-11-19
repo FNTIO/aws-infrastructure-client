@@ -17,13 +17,13 @@ How to set up a machine to work on this repo: the tools you need, how the worksp
 | `infra/` | FNTIO's own deployment: `config/project.ts`, `bin/app.ts`, PipelineStack, TestbedStack, the import CLI, the ops runbooks |
 | `samples/` | Consumer-voice CDK apps importing the package |
 
-The repo root is an npm workspace over `packages/*` and `infra`. **Install at the root only.** `npm install` inside `infra/` tries to fetch the private, unpublished `@fntio/infra-client` from the registry and fails with E404; the root install links it from `packages/`. `frontend/` and `desktop/` are separate installs (`npm ci` / `npm install` in their own directory).
+The repo root is an npm workspace over `packages/*` and `infra`. **Install at the root only.** `npm install` inside `infra/` would resolve `@fntio/infra-client` from the registry instead of the checkout; the root install links it from `packages/`. `frontend/` and `desktop/` are separate installs (`npm ci` / `npm install` in their own directory).
 
 ## Build order
 
 ```bash
 npm ci                                # repo root: packages/* and infra
-npm test                              # package (stacks + lambdas) and deploy app
+npm test                              # every workspace: the package, the plugin packages and the deploy app
 npm --prefix frontend run build       # BEFORE any cdk command
 npm run build                         # package dist/, if infra/ or samples/ complain about missing types
 ```
@@ -41,7 +41,7 @@ npm run build                         # package dist/, if infra/ or samples/ com
 cd packages/infra-client && npx tsc --noEmit && npm test
 ```
 
-Jest is transpile-only (`tsconfig.jest.json`) and bounded to half the cores and 2 GB per worker, so `tsc --noEmit` is the type check. The suite includes `lib/__tests__/cdk-nag.test.ts`, which synthesizes every hub stack plus a target-account stack and fails on any unsuppressed AwsSolutions finding; it skips itself when the frontend build or Lambda bundles are missing. Deliberate trade-offs are suppressed in that test with a reason.
+Jest is transpile-only (`tsconfig.jest.json`) and bounded to half the cores and 2 GB per worker, so `tsc --noEmit` is the type check. The suite includes `lib/__tests__/cdk-nag.test.ts`, which synthesizes every hub stack plus a target-account stack and fails on any unsuppressed AwsSolutions finding; the web bundle is stubbed, and it skips itself only when the API Lambda bundle (`assets/api/index.js`) is missing (in CI that is a failure, not a skip). Deliberate trade-offs are suppressed in that test with a reason.
 
 ### Deploy app tests
 
@@ -49,7 +49,7 @@ Jest is transpile-only (`tsconfig.jest.json`) and bounded to half the cores and 
 cd infra && npx tsc --noEmit && npm test
 ```
 
-Covers the deploy wiring and the import CLI. Run it whenever `infra/` changed.
+Covers the import CLI (`infra/cli/`). Run it whenever `infra/` changed.
 
 ### Frontend dev server
 
@@ -59,7 +59,7 @@ npm install
 npm start            # ng serve → http://localhost:4200, hot reload
 ```
 
-Sign-in is the app's own `/login` page against the real Cognito pool; there is deliberately no local auth bypass. `public/config.json` is dev-only (WebStack generates its own) and holds the pool and client ids plus the feature flags (`passkey`, `mfa`, `network`, `devShares`, `federation`, `plugins`); keep it matching the deployment you develop against. API calls go to `/api/*` through `proxy.conf.mjs`; `DEV_API_URL` overrides the target, and `DEV_API_URL=http://localhost:3000` points at a local `npm run dev` Express instance. Unit tests: `npm test` (Karma/Jasmine). Details: [Develop](https://github.com/FNTIO/aws-infrastructure-client/blob/main/frontend/README.md#develop).
+Sign-in is the app's own `/login` page against the real Cognito pool; there is deliberately no local auth bypass. `public/config.json` is dev-only (WebStack generates its own) and holds the pool and client ids plus the feature flags (`passkey`, `mfa`, `network`, `devShares`, `federation`, `plugins`); keep it matching the deployment you develop against. API calls go to `/api/*` through `proxy.conf.mjs`; `DEV_API_URL` is required (there is no default target), and `DEV_API_URL=http://localhost:3000` points at a local `npm run dev` Express instance. Unit tests: `npm test` (Karma/Jasmine). Details: [Develop](https://github.com/FNTIO/aws-infrastructure-client/blob/main/frontend/README.md#develop).
 
 ### Storybook
 
@@ -99,10 +99,10 @@ Point the first tab at a deployed site, or at `http://localhost:4200` with `ng s
 cd packages/infra-client && npx tsc --noEmit && npm test     # always
 cd infra && npx tsc --noEmit && npm test                      # if infra/ changed
 cd frontend && npx tsc --noEmit && npm run build              # if frontend changed (build when templates/styles changed)
-node --check desktop/*.js                                     # if desktop changed
+node --check desktop/*.js && (cd desktop && npm test)         # if desktop changed
 ```
 
-- Commits go straight to `main`, and pushing `main` deploys FNTIO's hub stacks (see [[Releasing]]).
+- Tracked work lives on an `ic-<issue>` branch and lands on `main` through a reviewed pull request; untracked chores may commit straight to `main`. Pushing `main` deploys FNTIO's hub stacks (see [[Releasing]]).
 - Large or risky changes (a new service, auth or grants logic, anything touching vending or cross-account trust) get a code review before they are committed.
 - New API services get a Jest suite mirroring the existing pattern (`__tests__/<name>Service.test.ts` with mocked AWS clients, plus route coverage in `app.test.ts` via supertest). New routes or key user flows get an e2e spec in `frontend/e2e/`; shared frontend `util/` code gets a spec.
 - A PR that touches frontend UI passes the Storybook sync check first: every routed page has a `Pages/` story rendering the real component, story args match real call sites, and no page markup is hand-copied.

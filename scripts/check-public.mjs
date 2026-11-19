@@ -1,7 +1,5 @@
-// The public repo's own guard, run by .github/workflows/secret-scan.yml on every push: the generic
-// classes in scripts/public-gate.mjs (account and resource ids, generated AWS hostnames, Cognito ids,
-// credentials, private keys, local paths, real addresses) over every tracked text file. Warnings
-// (public IPs, hostnames outside the allowlist) are printed for the reviewer; failures block.
+// The public repo's own guard, run by .github/workflows/secret-scan.yml on every push: the generic rule
+// classes in scripts/public-gate.mjs over every tracked text file. Warnings are printed for the reviewer; failures block.
 import fs from "node:fs";
 import { execSync } from "node:child_process";
 import { GENERIC_RULES, FORBIDDEN_FILES, TEXT, scanText } from "./public-gate.mjs";

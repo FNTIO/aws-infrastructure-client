@@ -162,8 +162,9 @@ expiration.
 - **Lifecycle.** Ledger entries survive a tab *disconnect* on purpose — the
   profiles stay in the file, so their expiry warnings stay accurate — but
   the tab's login session is cleared the moment you disconnect. Saved
-  deployments that don't answer at startup become inert "unreachable" tabs
-  with a remove button. Neither a disconnect nor that remove button forgets
+  deployments that don't answer at startup become "no network" or
+  "unreachable" tabs that retry on click and carry a remove button (see
+  "Several backends at once"). Neither a disconnect nor that remove button forgets
   the deployment's address: `recents.json` (next to `backends.json` in the
   userData folder, 20 rows, newest first, one per origin) keeps every
   deployment connected at least once, and the connect screen lists the ones
@@ -402,7 +403,7 @@ Troubleshooting:
   refused with a rename hint, never silently overwritten.
 - **Offline at launch** — a saved deployment nobody could reach (no DNS, no
   route, a timeout; typically the app reopening after a reboot before Wi-Fi
-  is back) shows as **· waiting for network** and is re-probed on its own:
+  is back) shows as **· no network** (tooltip "waiting for network") and is re-probed on its own:
   every 10 s while the machine is offline, then with backoff for about ten
   minutes once it is online, after which the tab reads **· unreachable**. A
   host that answers but is not an Infra deployment is unreachable at once.
@@ -439,7 +440,9 @@ app** for the page it is on, invitation included — an invite email's
 on the set-password screen. Emails carry only https links on purpose: many
 mail clients refuse to render custom-scheme links (Gmail web, for one), and
 Cognito's invite template is only documented to substitute `{####}` once.
-Any web URL can be turned into a link the same way.
+Any web URL can be turned into a link the same way. That includes the
+dialog links: `infraclient://<host>/accounts?open=mfa` opens the
+Authenticator (MFA) dialog in the app (frontend/README.md "Dialog links").
 
 **Packaged builds only on macOS**: the handler is the `CFBundleURLTypes`
 entry electron-builder writes from `build.protocols` in package.json;
@@ -599,8 +602,11 @@ manual trigger, a release build when `release.yml` calls it on a version tag
 (wiki: Releasing). Unsigned while the signing secrets are absent, signed +
 notarized + Gatekeeper-verified when they exist; a release build without
 them fails outright. Secrets are per repository, so every repository that
-cuts installers needs all five (see below); a clone without them yields an
-undistributable `-UNSIGNED` test artifact.
+cuts installers needs all five: `CSC_LINK` (base64 of the Developer ID
+Application `.p12`), `CSC_KEY_PASSWORD` (its export password), `APPLE_API_P8`
+(the App Store Connect API key file's contents), `APPLE_API_KEY_ID` and
+`APPLE_API_ISSUER`. A clone without them yields an undistributable
+`-UNSIGNED` test artifact.
 
 The workflow runs on `macos-15`, not `macos-latest`: on 2026-09-08 the
 `macos-26` image's OS update (25.5 → 25.6) made electron-builder's temporary
@@ -614,7 +620,7 @@ One-time FNTIO setup (**done 2026-09-01** — team `68BFH4A9T6`, cert
 approves; CSR from the build machine's Keychain, export as `.p12`) → an App
 Store Connect **API key** (`.p8`, downloadable once) for notarization. Both
 secrets live in the password manager, then as the five Actions **repository
-secrets** (Secrets tab, not Variables) named in the workflow header.
+secrets** (Secrets tab, not Variables) named above.
 Verified 2026-09-01: Gatekeeper-verify green; installed via browser
 download → `spctl` "accepted, Notarized Developer ID", staple valid. A new
 team's first-ever notarization can sit in Apple's queue ~an hour; later
@@ -622,8 +628,8 @@ runs take minutes.
 
 **Adding the secrets to another repository** (the release repo, a fork that
 cuts installers): Settings → Secrets and variables → Actions → New
-repository secret, five times, the names from the workflow header, values
-from the password manager. To regenerate `CSC_LINK`: Keychain Access → My
+repository secret, five times, the names above, values from the password
+manager. To regenerate `CSC_LINK`: Keychain Access → My
 Certificates → "Developer ID Application: FNTIO GmbH" → right-click →
 Export as `.p12` with a password (that password is `CSC_KEY_PASSWORD`), then
 `base64 -i cert.p12 | pbcopy`. The `.p8` cannot be downloaded a second time:
@@ -663,8 +669,10 @@ failed checks are retried quietly and never shown.
   click asks "Restart now / Later"; the row runs the same teardown as Quit
   (credentials removed, tunnel dropped) and the installer relaunches the new
   version. A plain tray Quit installs it too, so the next launch is already
-  current. Needs a signed build; an unsigned local build logs an error and
-  cannot install, though it still shows the row and one notification.
+  current. Needs a signed build: when the native updater rejects the download
+  (an unsigned local build, an app on a read-only volume), the row and Check
+  for Updates… fall back to "Open download page" for that version until the
+  app is relaunched, and its notification is not repeated.
 - **Windows, signed install (a release after 0.7.0):** updates like macOS.
   The installer downloads in the background; electron-updater checks its
   Authenticode signature against `publisherName` in the installed app's
@@ -695,8 +703,10 @@ failed checks are retried quietly and never shown.
   active in the last minute. It then repeats once a day until the update is
   installed; a relaunch starts that day over, so it can show once more about a
   minute after launch. A newer version notifies at once, and a version the
-  macOS updater rejected does not repeat. A Focus mode can still hide it; the
-  tray row stays either way.
+  macOS updater rejected does not repeat. One that could not be shown at all
+  (no notification support) is tried again a minute later. A Focus mode can
+  still hide it; the tray row stays either way. The notification's click opens
+  the Restart now / Later box, never a teardown on its own.
 - **Dev runs** (`npm start`) never touch the updater; Check for Updates… says
   so.
 
@@ -729,6 +739,10 @@ The frontend gates passkey sign-in/management on
   sign-in lands in the app. Verified working 2026-09-03 on a signed local
   0.1.0 build.
 - **Linux — gated off** (unvalidated).
+- **Every platform**: the Passkeys dialog shows **Open in your browser**,
+  which opens the same dialog on the web site for a passkey that belongs to
+  the browser. It is an ordinary new-window link, so `setWindowOpenHandler`
+  sends it to the system browser; no shell code is involved.
 
 **Windows verification checklist** (needs a real Windows 10/11 machine):
 install + sign in → Passkeys → "Add passkey" opens the native Hello sheet;

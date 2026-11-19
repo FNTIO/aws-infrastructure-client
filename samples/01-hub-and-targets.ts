@@ -64,6 +64,9 @@ const config: ProjectConfig = {
   waf: { enabled: true, rateLimit: 5000, perTokenRateLimit: 2000 },
   // Deployment-wide API ceiling (requests per second across every caller) — the defaults.
   apiThrottle: { rateLimit: 100, burstLimit: 200 },
+  // The account-wide API Gateway CloudWatch Logs role ships with CredsStack (the default); false hands it
+  // to a stack of your own.
+  apiCloudWatchRole: true,
   // Activity log retention; 400 outlasts the yearly access review.
   audit: { retentionDays: 400 },
 

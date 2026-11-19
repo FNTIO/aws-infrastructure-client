@@ -1,12 +1,6 @@
-// Class-based rules for what must never reach a public surface, written for the values that COULD be
-// added later, not only the ones that leaked once: AWS account and resource ids, generated AWS hostnames,
-// Cognito ids, credentials and vendor tokens, private-key blocks, local paths, real addresses, public IPs,
-// hostnames outside the fixture/vendor allowlist. Every rule has a positive and a negative sample in
-// public-gate.test.mjs. This file carries no deployment value and is copied verbatim into the public repo
-// (scripts/public-gate.mjs there); the private wrapper public-gate.mjs adds our own values on top.
-//
-// Scopes: "docs" = exported documentation, "full" = compiled code, package docs and product source,
-// "bundle" = built Lambda/web bundles (third-party code inlined, so only rules that cannot misfire there).
+// Class-based rules for what must never reach a public surface, written for kinds of value that COULD be added later.
+// Every rule has a positive and a negative sample in public-gate.test.mjs; scopes (docs/full/bundle) are defined in
+// RELEASING.md "What lives where". No deployment value lives here: the file is copied verbatim into the public repo.
 import fs from "node:fs";
 import path from "node:path";
 
@@ -117,10 +111,8 @@ export function scanText(rel, text, scope, rules) {
   return out;
 }
 
-/**
- * Scan every text file under `dir`. `classify(rel)` returns "skip", "bundle", "full" or "docs".
- * Returns { fail, warn, files, binaries } (binaries: non-text files seen, for the caller to judge).
- */
+/** Scans every text file under `dir`; `classify(rel)` returns "skip", "bundle", "full" or "docs".
+ *  Returns { fail, warn, files, binaries } (binaries: non-text files seen, for the caller to judge). */
 export function scanTree(dir, classify, rules) {
   const fail = [];
   const warn = [];

@@ -1,4 +1,4 @@
-The portal's trust rests on one fixed string: the OIDC issuer host. Every workload account's IAM OIDC provider and every target role's trust policy name that host, so it is decided once, before the first deploy, and never re-derived or changed; the deployment README's worked example is `issuer.portal.example.com`. Around that core the package ships AWS WAF, Security Hub FSBP compliance by construction, logging with redaction, and a `prod` knob for deletion and termination protection. This page summarizes the posture and links to the runbooks for key rotation, the issuer migration and restore.
+The portal's trust rests on one fixed string: the OIDC issuer host. Every workload account's IAM OIDC provider and every target role's trust policy name that host, so it is decided once, before the first deploy, and never re-derived or changed; the package README's worked example is `issuer.access.acme.com`. Around that core the package ships AWS WAF, Security Hub FSBP compliance by construction, logging with redaction, and a `prod` knob for deletion and termination protection. This page summarizes the posture and links to the runbooks for key rotation, the issuer migration and restore.
 
 ## Trust model
 
@@ -22,13 +22,13 @@ Runbooks: [Cross-account: trust a second account](Access-Model#cross-account-tru
 
 Rules: a per-IP limit on `/api/*` (web ACL only, `waf.rateLimit`, default 5000 per 5 minutes, sized for an office NAT); a per-token limit keyed on the `authorization` header (API ACL only, `waf.perTokenRateLimit`, default 2000 per 5 minutes, a ceiling per token rather than a user quota); and the AWS managed `AmazonIpReputationList`, `KnownBadInputsRuleSet` and `CommonRuleSet`, with five Common body and user-agent rules in COUNT because real traffic (data-URI logos, bulk imports, service-user clients) trips them. Blocked and counted requests log to `aws-waf-logs-<prefix>-*` with 3-month retention and the `authorization` and `cookie` headers redacted; sampling is off. About $26 per month per deployment. The API stage also throttles at `apiThrottle` (default 100 rps with a burst of 200) across every caller.
 
-**By construction, any config.** ERROR-level execution logs and X-Ray on the API stage; both CloudFront distributions HTTPS-only with the `TLSv1.2_2021` viewer policy and Origin Access Control on their buckets; a pinned Cognito password policy and an explicit `mfa` choice (a password-only pool fails at synth until it picks one); on-demand DynamoDB; the VPN VPC with its default security group stripped, REJECT-only flow logs and only 443 open; Fargate tasks non-privileged, without credential env vars, with logs on every container; encrypted EFS with per-site access points; the Headscale ALB with a single TLS 1.3 listener; key-scoped `kms:Sign`; Node 22 Lambdas; SSL-only buckets and topics; 3-month log retention on every Lambda the package writes (the framework functions CDK adds for the `Custom::FirstAdmin` and `Custom::HeadscaleApiKey` providers keep CloudWatch's never-expire default).
+**By construction, any config.** ERROR-level execution logs and X-Ray on the API stage; both CloudFront distributions HTTPS-only with the `TLSv1.2_2025` viewer policy, Origin Access Control on their buckets and origin failover to a same-region copy of each bucket; a pinned Cognito password policy and an explicit `mfa` choice (a password-only pool fails at synth until it picks one); on-demand DynamoDB; the VPN VPC with its default security group stripped, REJECT-only flow logs and only 443 open; Fargate tasks non-privileged, without credential env vars, with logs on every container; encrypted EFS with per-site access points; the Headscale ALB with a single TLS listener (TLS 1.2+, `TLS13_12_RES_PQ`); key-scoped `kms:Sign`; Node 22 Lambdas; SSL-only buckets and topics; 3-month log retention on every Lambda the package writes (the framework functions CDK adds for the `Custom::FirstAdmin` and `Custom::HeadscaleApiKey` providers keep CloudWatch's never-expire default).
 
 **With `prod: true`.** Termination protection on every hub stack, PITR, deletion protection on the tables, the user pool and the ALB, EFS automatic backups, Container Insights on the control-plane cluster. A sandbox fails these on purpose.
 
 **Opt-in.** `loginMethods.threatProtection: true` (Cognito PLUS plan, per-MAU cost) and `containerInsights: true` on a connector.
 
-**Desktop.** The Electron shell only loads `https://` backends and confines in-view navigation to the backend's origin plus Cognito; anything else opens externally.
+**Desktop.** The Electron shell only loads `https://` backends and confines in-view navigation to the backend's origin, its hosted-UI domain, Cognito and the hosts of its federated sign-in providers; anything else opens externally.
 
 Full lists: [What deploys (default on)](Security-Posture#what-deploys-default-on) and [FSBP coverage](Security-Posture#fsbp-coverage), both under [Security posture](Security-Posture#security-posture--waf--security-hub-cspm). Consumer summary: [Security Hub](https://github.com/FNTIO/aws-infrastructure-client/blob/main/packages/infra-client/README.md#security-hub).
 
@@ -40,7 +40,6 @@ These FSBP controls fail as shipped and are suppressed once per hub account and 
 | --- | --- | --- |
 | CloudFront.17 | web and issuer distributions | Signed URLs or cookies would lock users out of the login page and STS out of the JWKS |
 | APIGateway.2 | the `creds-api` stage | Backend client certificates exist for HTTP backends; the only integration is a Lambda proxy, and a stage certificate expires yearly with no rotation |
-| CloudFront.4 | web and issuer distributions | Origin failover needs two origins; each has one bucket |
 | EC2.21 | the VPN VPC's default NACL | A replacement NACL leaves the default one unassociated and fails EC2.16 instead; nothing listens on 22 or 3389 |
 | SecretsManager.1, .4 | `<prefix>/headscale-apikey-<site>` | No rotation Lambda; rotation is a manual stamped redeploy |
 | KMS.3 | a retired issuer signing key | Fires only during the 7 to 30 days a rotated-out key waits for deletion |
@@ -101,8 +100,8 @@ Rules, in order:
    hits stay bounded by the stage throttle (`apiThrottle`, default 100 rps / 200 burst).
 2. **Per-token rate limit — API ACL only.** `waf.perTokenRateLimit` API
    requests per bearer token per 5 minutes (default 2000), same 429 answer.
-   The aggregation key is the `authorization` header value, i.e. the Cognito
-   token: nobody can land in another caller's bucket (tokens are signed),
+   The aggregation key is the `authorization` header value, i.e. the bearer
+   token (Cognito ID token, personal access token or service-user token): nobody can land in another caller's bucket (tokens are signed),
    and a request with no `authorization` header is not evaluated by this
    rule at all (WAF skips a request that lacks a key component). It lives on
    the API stage only — every `/api/*` call from CloudFront lands there
@@ -134,7 +133,7 @@ Rules, in order:
    `CrossSiteScripting_BODY`: SVG markup in a logo, HTML or `../` in a
    description) and `NoUserAgent_HEADER` (service-user clients such as .NET
    `HttpClient` send none). Every body is still shape-validated by the API
-   and capped at 100 KB by `express.json`; the URL, query-string, cookie and
+   and capped at 1 MB by `express.json`; the URL, query-string, cookie and
    header rules block as shipped. The list is `COMMON_RULES_COUNT_ONLY` in
    `web-acl.ts` — widen it only with a recorded reason.
 
@@ -255,7 +254,7 @@ locks the by-construction rows down.
 | APIGateway.1, .3 | `creds-api` stage: ERROR-level execution logs into the group API Gateway manages itself (no retention set; the volume is near zero) and X-Ray tracing (a gateway segment only — no Lambda has active tracing) |
 | APIGateway.4, CloudFront.6, WAF.10, WAF.12 | the two web ACLs above |
 | APIGateway.8, .9, .11 | not applicable since 2026-09-08 — the issuer has no HTTP API, route or API Gateway domain any more (static S3 + CloudFront, "Issuer on S3 + CloudFront") |
-| CloudFront.1, .3, .9, .10, .12, .13, .15 | both distributions (app + issuer): default root object, HTTPS only, HTTPS + TLS 1.2 to the API origin, OAC on the buckets, `TLSv1.2_2021` viewer policy |
+| CloudFront.1, .3, .4, .9, .10, .12, .13, .15 | both distributions (app + issuer): default root object, HTTPS only, HTTPS + TLS 1.2 to the API origin, OAC on the buckets, the `TLSv1.2_2025` viewer policy (the app distribution with the `web` block; without a custom certificate CloudFront sets the policy and CloudFront.15 does not grade it), and an origin group over the bucket and a same-region copy. The issuer's publisher writes its three objects to both buckets and its group fails over on 403, 404 and 5xx, so an emptied issuer bucket or a lost policy still serves the keys; the site bucket replicates into its copy, delete markers included, and its group fails over on 5xx only (the copy mirrors deletes). Neither copy covers a regional outage |
 | CloudFront.7, .8 | the issuer distribution always (custom cert + SNI); the app distribution only WITH the `web` block — without it those two fail for the app; run with `web` |
 | Cognito.3, Cognito.5 | pinned password policy; a password-only pool must set `mfa` explicitly — synth fails naming the two ways out, so the config always describes the pool |
 | DynamoDB.1 | on-demand tables |
@@ -263,7 +262,7 @@ locks the by-construction rows down.
 | ECS.3, .4, .8, .9, .10, .18 | Fargate task definitions: no host PID, non-privileged, no credential env vars, awslogs on every container, latest platform, EFS in-transit encryption |
 | EFS.1, .3, .4, .8 | encrypted state file system, per-site access points with a root directory and POSIX user |
 | ELB.1, .4, .12, .13, .17, .18 | the Headscale ALB has ONE listener (443, `TLS13-1-2-Res-PQ-2025-09`, no port-80 redirect any more), drops invalid headers, defensive desync mode, two AZs |
-| S3.9, CloudFront.5 | since 0.5.0: the web, issuer and plugin-assets buckets send server-access logs, and both distributions standard logs, into `DataStack`'s `AccessLogsBucket` (90-day expiry, kept on teardown with `prod`). That bucket is the one that logs nowhere: AWS's own S3.9 text says to suppress its finding, and CloudFront's logging writes with an ACL grant, so an S3.12 finding on it is suppressed the same way |
+| S3.9, CloudFront.5 | since 0.5.0: the web, issuer and plugin-assets buckets and the two failover copies send server-access logs, and both distributions standard logs, into `DataStack`'s `AccessLogsBucket` (90-day expiry, kept on teardown with `prod`). That bucket is the one that logs nowhere: AWS's own S3.9 text says to suppress its finding, and CloudFront's logging writes with an ACL grant, so an S3.12 finding on it is suppressed the same way |
 | KMS.1, .2, .3, .5; Lambda.1, .2, .5; S3.2, .3, .5, .6, .8, .12, .13; SNS.4; IAM.1, .21; CloudFormation.4 | key-scoped `kms:Sign` only, named principals, Node 22, VPC Lambdas in two AZs, private bucket with SSL-only policy + a lifecycle rule, SSL-only topic, no customer managed policies, CDK's CloudFormation execution role |
 
 **Passes with `prod: true`** (the production-hardening knob): CloudFormation.3
@@ -297,7 +296,6 @@ above; the steps are the same):
 | Control | Resource | Why it cannot pass |
 | --- | --- | --- |
 | APIGateway.2 | the `creds-api` stage | Backend-auth client certificates exist for HTTP backends. The only integration is a Lambda proxy invoked through the AWS API — nothing to authenticate — and a stage certificate would expire every 365 days with no rotation. |
-| CloudFront.4 | the web and issuer distributions | Origin failover needs two origins; each has exactly one bucket. |
 | EC2.21 | the VPN VPC's default NACL | The default NACL allows everything; a replacement NACL that excludes 22/3389 leaves the default one unassociated, which fails EC2.16 instead. Nothing in the VPC listens on 22 or 3389 and every SG is closed. |
 | SecretsManager.1, .4 | `<prefix>/headscale-apikey-<site>` | No rotation Lambda yet; rotation is the manual `-c headscaleKeyRotation=<stamp>` redeploy ("Headscale admin ops"). |
 | KMS.3 | a retired issuer signing key | Fires only for the 7–30 days a rotated-out key waits for deletion ("Signing-key rotation"). |

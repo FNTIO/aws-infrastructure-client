@@ -45,7 +45,7 @@ CredsStack deploy — and a fresh account's SES sandbox delivers only to
 verified recipients, so the very first invite is exactly the mail the sandbox
 eats. Pick one BEFORE deploy #1:
 
-- get SES production access first (see "Email deliverability" below), or
+- get SES production access first (see [Email deliverability](Runbooks-Operations#email-deliverability--cognito-via-ses)), or
 - verify the `firstAdmin.email` address as an SES identity (console →
   Identities → Create identity → Email address; recipient clicks the
   confirmation link), or

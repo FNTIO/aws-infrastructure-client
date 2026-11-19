@@ -12,7 +12,7 @@ Symptom-first answers for the failures seen so far: issues reported from consume
 
 - Symptom: `cdk deploy CredsStack` fails on the API stage while upgrading to 0.1.2; empty log groups are left behind by the rollback, and admin pages error until the API is on the same version as the web app.
 - Cause: 0.1.2 enabled access logging on the vending API. A consumer `cdk.json` with `@aws-cdk/aws-apigateway:disableCloudWatchRole` set to `true` stops CDK from creating the account-level CloudWatch role the stage needs; the package did not set it explicitly.
-- Fix: fixed in 0.1.3, which sets `cloudWatchRole: true` so the role ships with CredsStack regardless of the consumer's flags. Retrying is safe; delete the orphaned empty log groups by hand. Deploy the hub stacks together, as [Upgrade](https://github.com/FNTIO/aws-infrastructure-client/blob/main/packages/infra-client/README.md#upgrade) says.
+- Fix: fixed in 0.1.3, which sets `cloudWatchRole: true` so the role ships with CredsStack regardless of the consumer's flags. Retrying is safe; delete the orphaned empty log groups by hand. A deployment whose own stack sets that role switches CredsStack's copy off with `apiCloudWatchRole: false` ([Configuration Reference](Configuration-Reference#apicloudwatchrole)); the same error then means that stack has not set it yet. Deploy the hub stacks together, as [Upgrade](https://github.com/FNTIO/aws-infrastructure-client/blob/main/packages/infra-client/README.md#upgrade) says.
 
 ### Type check fails on `githubRepo` in `ProjectConfig`
 
@@ -139,8 +139,8 @@ Symptom-first answers for the failures seen so far: issues reported from consume
 ### `npm install` inside `infra/` fails with E404
 
 - Symptom: npm tries to fetch `@fntio/infra-client` from the registry and dies.
-- Cause: the package is private and unpublished; only a root install links it from `packages/`.
-- Fix: run `npm ci` (or `npm install`) at the repo root, never inside a workspace. See [Install, test, deploy](https://github.com/FNTIO/aws-infrastructure-client/blob/main/packages/infra-client/README.md#deploy).
+- Cause: an install inside a workspace resolves `@fntio/infra-client` from the registry instead of the checkout; only a root install links it from `packages/`.
+- Fix: run `npm ci` (or `npm install`) at the repo root, never inside a workspace. See [Build order](Development-Setup#build-order).
 
 ### Synth throws "Web assets not found"
 

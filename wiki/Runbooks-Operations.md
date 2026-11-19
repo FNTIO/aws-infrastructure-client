@@ -123,7 +123,7 @@ never touches cross-account trust.
 
 ## Debugging
 
-- **Logs:** CloudWatch → `/aws/lambda/CredsStack-VendingApiHandler…`. Each request logs a
+- **Logs:** CloudWatch → the CDK-named group `CredsStack-VendingApiHandlerLogs…`. Each request logs a
   JSON trail (`request` → `requireAuth` → `ALLOWED`/`DENIED` → `SUCCESS`). Cross-stream:
   Logs Insights `filter @message like /DENIED/`.
 - **Stale 401s:** the API is CloudFront-fronted; a cached `401` can linger after auth

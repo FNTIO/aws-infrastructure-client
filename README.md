@@ -35,8 +35,9 @@ Download the installer for your platform from the latest
 [Release](https://github.com/FNTIO/aws-infrastructure-client/releases/latest):
 `infra-client-<version>-arm64.dmg` for macOS (signed and notarized; the app
 updates itself from this repository's Releases) or
-`infra-client-<version>-x64.exe` for Windows (signed from the release after
-0.7.0 on; the app announces new versions and opens the download page). One
+`infra-client-<version>-x64.exe` for Windows (signed from 0.8.0 on; a signed
+install updates itself like macOS, an install of 0.7.0 or earlier only
+announces new versions and opens the download page). One
 binary serves every deployment: on first launch you enter your portal's URL.
 
 ## What is public
@@ -48,7 +49,7 @@ binary serves every deployment: on first launch you enter your portal's URL.
 | [packages/infra-client-plugin-example/README.md](packages/infra-client-plugin-example/README.md) and the other `packages/*/README.md` | The plugin author's guide and the READMEs of the plugin packages |
 | [samples/](samples/) | Five consumer-voice CDK apps importing the package |
 | [desktop/README.md](desktop/README.md), [frontend/README.md](frontend/README.md) | How the desktop client and the web app behave, are signed, update themselves, handle passkeys |
-| [.github/](.github/) | Issue forms, the label taxonomy, the wiki sync |
+| [.github/](.github/) | Issue forms, the label taxonomy, the label, issue-triage and wiki workflows, the secret scan |
 
 The compiled stacks and constructs are in the package's `dist/` folder,
 browsable at [unpkg.com/browse/@fntio/infra-client/](https://unpkg.com/browse/@fntio/infra-client/).

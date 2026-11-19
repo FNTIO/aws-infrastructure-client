@@ -4,7 +4,7 @@ Index of the operational runbooks. Each row names a runbook, says when you reach
 
 | Runbook | When you need it | Cadence |
 | --- | --- | --- |
-| [Install, test, deploy](https://github.com/FNTIO/aws-infrastructure-client/blob/main/packages/infra-client/README.md#deploy) | Root install, tests, the frontend build every `cdk` command needs, bootstrapping (including us-east-1) and the first manual hub deploy; also the Lambda concurrency raise a fresh account needs | |
+| [Install, test, deploy](https://github.com/FNTIO/aws-infrastructure-client/blob/main/packages/infra-client/README.md#deploy) | Bootstrapping the hub account (both regions), the first hub deploy, connecting a workload account and joining a VPC to the VPN | |
 | [Setup checklist](Admin-Guide#setup-checklist--first-admin-onboarding-card) | What the in-app setup card checks off (admin, branding, workload account, team, custom email) and how it is dismissed or reopened | |
 | [Theme wizard](Admin-Guide#theme-wizard--admin-set-branding-overlay) | How admins restyle the portal after deploy (`/branding.json` merged over `config.json`) and the by-name site bucket migration on the first deploy that includes it | |
 
@@ -91,7 +91,7 @@ Network stacks are deployed by hand, never from CI. Concepts are on [[Private Ne
 | Runbook | When you need it | Cadence |
 | --- | --- | --- |
 | [Debugging](Runbooks-Operations#debugging) | Where the API logs are and the per-request JSON trail; cached 401s at CloudFront and how to tell an API Gateway 401 from the app's | |
-| [Tear down](https://github.com/FNTIO/aws-infrastructure-client/blob/main/packages/infra-client/README.md#tear-down) | Lift termination and deletion protection, destroy in reverse order, then clean up retained tables, web ACLs, EFS recovery points and test users | |
+| [Tear down](https://github.com/FNTIO/aws-infrastructure-client/blob/main/packages/infra-client/README.md#tear-down) | Lift termination and deletion protection, destroy in reverse order, then clean up what CloudFormation retains | |
 
 ## Desktop
 

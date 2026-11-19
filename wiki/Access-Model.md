@@ -29,7 +29,7 @@ flowchart LR
     E --> R["vending, accounts and resources listings, request eligibility, reapproval sweep, expiry notices, users directory, grantee lists, ACL reconciler"]
 ```
 
-`effectiveAccess(userId)` is the union of the user's direct rows and the rows of every group in their memberships. A row counts only while unexpired, whoever holds it (admin-granted group rows carry no expiry; a dev share's do). The function lives in `packages/infra-client/lambdacode/api/services/access.ts` (`effectiveAccess`, `effectiveFor`, `holdersOf`, `snapshot`) and every reader goes through it. Cost is one Query on the user's partition (grants, memberships and prefs in one page) plus one Query per group; the vending hot path (`effectiveFor`, via `effectiveForMany`) replaces the per-group Queries with one BatchGet of the (group, target) keys, so a vend is two reads. The `direct` and `viaGroups` labels the admin views show are derived at read time.
+`effectiveAccess(userId)` is the union of the user's direct rows and the rows of every group in their memberships. A row counts only while unexpired, whoever holds it (admin-granted group rows carry no expiry; a dev share's do). The function lives in `packages/infra-client/lambdacode/api/services/access.ts` (`effectiveAccess`, `effectiveFor`, `holdersOf`, `snapshot`) and every reader goes through it. Cost is one Query on the user's partition (grants, memberships and prefs in one page) plus one Query per group; the vending hot path (`effectiveFor`, via `effectiveForMany`) never reads the whole partition: a BatchGet of the user's own rows for the wanted targets and a Query of their memberships run in parallel, then one BatchGet of the (group, target) keys, so a vend is two bounded round trips. The `direct` and `viaGroups` labels the admin views show are derived at read time.
 
 Losing access is a row delete, so a notice cannot ride on the row. Every mutation that can end access (a direct revoke, leaving a group, a bundle shrinking, a group, role or resource delete, a reapproval lapse) goes through `accessNotices.withAccessDiff`, which diffs each affected user's effective targets before and after and writes a Revocations notice only for what was really lost.
 
@@ -78,7 +78,7 @@ From the repo's working rules:
 - Tests seed `__tests__/helpers/fakeAccess.ts` (an in-memory Access table) instead of stubbing Query or Scan of the table by hand.
 - Accounts and roles are registered by an admin (CDK, admin API or admin UI); there is no self-service flow to add them.
 
-## Data model — twelve tables (in `DataStack`)
+## Data model — eleven tables (in `DataStack`)
 
 Kept in a **separate stack** from the compute so the durable data outlives any API
 redeploy. Tables reference each other by id (no duplicated data):
@@ -137,7 +137,7 @@ Design — grants are stored **exactly as granted**, in ONE table (`Access`):
 | `user#<sub>` \| `group#<groupId>` | `role#<acct>#<roleName>` \| `resource#<resourceId>` \| `plugin#<pluginId>#<acct>#<user\|admin>` \| `share#<shareId>` | `grantedBy`, `grantedAt`, `expiresAt?`, (user rows: `expiringSeen?`, `expiredSeen?`, `expiryLoggedAt?`; share rows: `ttl`) | a grant to that principal (a `plugin#` row authorizes only through `pluginAccess.ts`) |
 | `sharedef` | `share#<shareId>` | owner, `label`, `port`, `siteId`, `expiresAt`, `ttl` | a dev share's definition — not a principal, so never anyone's access |
 | `user#<sub>` | `member#<groupId>` | `addedBy`, `addedAt` | group membership |
-| `user#<sub>` | `pref#role#<acct>#<roleName>`, `pref#presence`, `pref#adminReview`, `pref#network`, `pref#notifications` | `profileName?`, `roleLabel?`, … | per-user preferences (their own rows — a preference write can no longer touch a grant, by construction) |
+| `user#<sub>` | `pref#role#<acct>#<roleName>`, `pref#presence`, `pref#adminReview`, `pref#network`, `pref#notifications`, `pref#fav#<account>`, `pref#recent` | `profileName?`, `roleLabel?`, … | per-user preferences (their own rows — a preference write can no longer touch a grant, by construction) |
 
 GSI `byTarget` (`target` → `principal`) answers "who holds X" (users AND
 groups; groups expand to members via `byTarget` on `member#<g>`) and "who is
@@ -152,7 +152,8 @@ request eligibility, the reapproval sweep, expiry notices, the users
 directory, grantee lists, and the ACL reconciler. Cost: 1 Query on the user's
 PK (grants + memberships + prefs in one page) + one Query per group they are
 in (single digits); the vending hot path (`effectiveFor` → `effectiveForMany`)
-replaces the per-group Queries with one BatchGet of (group, target) keys — two reads.
+reads only the user's rows for the wanted targets plus their memberships, then one
+BatchGet of (group, target) keys — two bounded round trips.
 
 Invariant, restated: **for a principal, row presence == permission for that
 principal; a user's principals are themselves + the groups they are in.**
@@ -278,7 +279,7 @@ validate; `''` clears). Set them in Admin → Accounts (account panel row
 The profile-name override, the personal role label and the auto-vend star are
 `user#<sub>` → `pref#role#<acct>#<role>` rows on the Access table. A
 preference row is not a grant row (different SK — readers only treat
-`role#`/`resource#` targets as grants), so a preference write can never
+`role#`/`resource#`/`share#`/`plugin#` targets as grants), so a preference write can never
 create access, by construction; the writes are plain upserts. Preferences
 survive a revoke (harmless UI state; a re-grant finds them again).
 

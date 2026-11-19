@@ -1,11 +1,6 @@
 #!/usr/bin/env node
-// Verifies wiki/*.md before it is mirrored to the GitHub wiki:
-//   - [[Page]] links resolve to a page in wiki/
-//   - absolute links into this repo point at an existing file, and the
-//     #anchor (if any) matches a heading in that file (GitHub's slug rules)
-//   - no relative file paths (they do not resolve inside a wiki)
-//   - no 12-digit numbers (AWS account ids; the wiki goes public with the repo),
-//     except AWS's own documentation placeholders
+// Gate on wiki/*.md before the mirror: links and #anchors resolve (GitHub slug rules), no relative paths
+// (they do not resolve inside a wiki), no 12-digit numbers except AWS's documentation placeholders.
 // Usage: node .github/scripts/check-wiki-links.mjs   (exit 1 on any finding)
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';

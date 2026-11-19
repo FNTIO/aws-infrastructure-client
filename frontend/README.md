@@ -69,8 +69,11 @@ Setup (once per machine / per clone):
    (`you+e2e-basic@…`, admin off, no roles) — the admin-gating spec uses
    it to prove non-admins see no admin nav and bounce off /admin routes
    (skipped when `E2E_BASIC_*` is unset).
-2. `cp .env.e2e.example .env.e2e`, set `E2E_BASE_URL` to your deployment and
-   fill in the logins. `.env.e2e` is untracked — never commit it.
+2. `cp .env.e2e.example .env.e2e`, set `E2E_BASE_URL` to your deployment,
+   fill in the logins and set `E2E_ACCOUNT_ID` to the twelve-digit account
+   the admin user holds a real role in (the vend flows fail with a message
+   naming the variable when it is missing). `.env.e2e` is untracked — never
+   commit it.
 3. `npx playwright install chromium` (browser binary, per machine).
 
 On a deployment where no admin has saved or skipped a theme yet, the
@@ -214,7 +217,7 @@ the theme wizard via `PUT /admin/branding`) is fetched at boot alongside
 (`ConfigService`). The wizard itself (`core/config/theme-wizard.component.ts`,
 admin-only: first login with no overlay, or the user menu's "Customize
 theme") ports the design prototype's sidebar — name, logo, the whole accent
-swatch board incl. the mode-aware `mono` + hex + her Strength slider
+swatch board incl. the mode-aware `mono` + hex + the Strength slider
 (`deepen()` — same-hue darkening), Border Strength (no gray-tone picker —
 decided 2026-09-09; a saved `grayTone` passes through a re-save
 untouched),
@@ -346,8 +349,8 @@ minting; SES still sends the code emails.
   re-runs the authorize redirect once, `FEDERATION_NOT_INVITED` is worded for the person.
   Mapped claims show under the email on Users, on the user detail and next to the caller on
   Activity, labelled from `config.json.federation.claims`.
-- **The flow** (live-verified against the dev pool — see the protocol notes
-  in `cognito-api.ts`): email → `InitiateAuth(USER_AUTH)` returns
+- **The flow** (live-verified 2026-08-11 against the dev pool): email →
+  `InitiateAuth(USER_AUTH)` returns
   `AvailableChallenges` and sends *nothing* → chooser (or the remembered
   method's fast path). Each pick is a fresh `InitiateAuth` with
   `PREFERRED_CHALLENGE`: password is completed **inline in that one call**
@@ -396,6 +399,23 @@ minting; SES still sends the code emails.
   login chooser and the dialog both gate on
   `DesktopBridgeService.passkeyCapable`, and the ceremonies carry a 70s
   ceiling timeout as a backstop for a shell with no prompt UI.
+- **Dialog links**: `?open=passkeys` and `?open=mfa` on a signed-in page
+  open the Passkeys and the Authenticator (MFA) dialog, so a "set up MFA
+  here" link can be sent around. Use `<site>/accounts?open=mfa`: it works
+  for everyone, while a URL that redirects without its query (the legacy
+  `/admin/service-users`, an admin page opened by a non-admin) loses the
+  parameter on the way. The shell (`shell.component.ts`) reads the
+  parameter and then removes it with a history replace, keeping the page,
+  every other parameter and the fragment, so a reload does not reopen the
+  dialog. It follows the menu items' gates: with the
+  method off in config, or in a federated session, it opens nothing and is
+  still removed; any other value is left alone. Signed out, the login bounce
+  carries the query like any deep link. In the desktop app the Passkeys
+  dialog adds **Open in your browser** on every build, a new-window link to
+  `<origin>/accounts?open=passkeys` (`dialog-link.ts`) that the shell hands
+  to the system browser: a passkey belongs to the browser or app it was
+  added in, so the browser's own has to be added there. The browser has its
+  own session, so it asks for a sign-in first unless one is open there.
 - **Passkeys are per browser/app**: a passkey added in the macOS desktop app
   lives in the app's keychain group and is invisible to browsers on the same
   Mac (and vice versa; Windows Hello is the exception — one credential store
@@ -688,8 +708,9 @@ loaded rows, else from `details.affected`) and expands on click to one indented 
 per effect; expansion is remembered per batch, and ticking a person under **Done to**
 expands the rows that touched them. A per-user row whose primary row is not loaded (a
 person's own trail, or a batch cut by the window) stands alone with its "by …" clause,
-since it is then the only account of what happened. Facet options and counts come from
-the listed rows only; search and the CSV cover the nested ones too (the CSV adds one
+since it is then the only account of what happened. Facet options come from the enum
+tables, the baseline window and the loaded rows, without counts; search and the CSV cover
+the nested ones too (the CSV adds one
 `↳ access.gain` / `↳ access.lose` line under each parent). The Users page's **Access report** button
 downloads `GET /api/admin/access-report` (current state, one row per person × thing).
 
@@ -800,31 +821,29 @@ downloads `GET /api/admin/access-report` (current state, one row per person × t
 
 ## Network resources & admin catalog pages (Epic 4)
 
-Nav is two sections: **Your access** (Accounts, Resources — the user's own)
-and, for admins, **Administration**, whose links group into pairs separated by
-hairline dividers: catalog (Accounts, Resources), people (Users, Groups),
-oversight (Requests, Activity).
+Nav is two sections: **Your access** (Accounts, Network — the user's own)
+and, for admins, **Administration** (Accounts, Network, Users, Groups,
+Requests, Activity); plugin entries append to each section. The labels live
+once, in `shared/ui/sidebar.component.ts` (`NAV_ITEM_DEFS`).
 
 User-facing:
 
-- **Accounts** (`/accounts`, `features/accounts/`) — since 2026-08-17 one
-  flowing row of per-account boxes (plain, non-collapsible; title = account
-  name · N roles) whose role cards are titled by ROLE (the card's own Role
-  row is hidden via `showRoleRow`). A box's flex-basis is N card widths, so
-  a one-role account is card-sized and boxes pack several per row; when the
-  row is narrower the box shrinks and its cards wrap inside.
-- **Resources** (`/resources`, `features/resources/`) — nested
-  account → VPC → resource-card layout: collapsible account groups
-  (`app-project-group`) each holding one
-  collapsible VPC bar (`vpc-group.component.ts`) over the card grid. Card
+- **Accounts** (`/accounts`, `features/accounts/`) — two shapes, chosen by
+  `dashboard.layout` (`auto` picks the plain list while every held account is
+  main): a plain list, or sections (Signed in now, Favorites, Main, Recently
+  vended) under one sticky server search, plus a
+  paged table of the accounts outside them (see "List rendering" above).
+- **Resources** (`/resources`, `features/resources/`, nav label **Network**)
+  — a flat list of VPC bars (`vpc-group.component.ts`, one per granted VPC;
+  see "The Network page is a flat list of VPC blocks" below) over the card
+  grid, then the Shares group and My devices. Card
   face shows account name + ID and the description; connection details live
   behind **Copy vars**, a Get-credentials-style dialog listing Account ID /
   Host / Port(s) plus one type-specific value: `psql` command (DATABASE),
   full URL (WEB), `ssh` command (HOST, only when port 22 is open). WEB cards
-  also get "Open in browser". Below the granted groups, **Available to
-  request** is one collapsible section (open/closed persisted in
-  localStorage) with the whole catalog nested the same way; it feeds the
-  same request/approval flow as roles. Reachability changes take ≤5 min
+  also get "Open in browser". The requestable catalog is the docked
+  `app-request-access-panel` (see "Docked side panel"); it feeds the same
+  request/approval flow as roles. Reachability changes take ≤5 min
   (the ACL reconciler's cadence) — the UI says so rather than pretending
   it's instant.
 - **Dev shares** (desktop only, `config.devShares.enabled`) — a **Shares**
@@ -1044,7 +1063,8 @@ one**; single-pick pages disable their bar buttons until a row is picked):
   call. Creating a group is still the form (`group-form.component.ts`); the
   old Edit sub-page and Manage-members dialog are gone.
 
-Requests carry a `kind` (`ROLE` default / `RESOURCE`); the admin requests
+Requests carry a `kind` (`ROLE` when absent, `RESOURCE`, `PLUGIN`, and the
+review kinds `ADMIN`, `SERVICE_USER`, `GROUP`); the admin requests
 page, decision dialog, and notification bell all branch on it. The user-side
 `GET /api/requests` joins `resourceName` server-side so the bell can label
 resource rows.
@@ -1056,6 +1076,10 @@ resource rows.
   They used to hardcode 560px each; Network's grouped table needs 860px, so opening a docked panel
   narrowed `.main` without the sidebar collapsing and two nested horizontal scrollbars appeared at once
   (2026-09-09). A second floor anywhere brings that back.
+- **Border Strength floors.** `BORDER_ALPHA` in `core/config/branding.ts` (ported 1:1 from the design
+  mockup's `applyGrayStrength`) is a set of floors, not a clamped range: the stylesheet's resting alphas
+  are strength 0, the mockup's recommended value, and 0 still draws a hairline — a card with no border at
+  all reads as a rendering bug, not a design choice.
 - **Tooltips and dialogs.** `.main` and `.band` carry a `backdrop-filter`, which per spec makes them the
   containing block for any `position: fixed` descendant. A tooltip bubble or dialog left inside them is
   positioned against `.main`'s box, not the viewport, and an `absolute` one is clipped by the nearest
@@ -1065,3 +1089,14 @@ resource rows.
 - **Page header subtitle.** One short sentence, no second clause after ", " / " — " / ". ": it wraps
   (never truncates) and a second line drags the actions row down. Longer help goes in `subtitleInfo`,
   the ⓘ tooltip (Storybook: PageHeader/WithInfoTooltip; the design spec (Design.md) §14).
+- **Row primary identifiers share one tracking.** Every table/list row's primary identifier (a user's
+  email, an account's name, a resource's name, a group's name, a service user's name) is the inherited
+  row `text-sm font-medium text-surface-foreground` plus `tracking-[0.015em]`, applied at the call sites
+  together so the rows stay identical to each other. +0.01em is sub-pixel at 14px and invisible;
+  +0.025em (tracking-wide) read too airy in the shipped tables; 0.015em (0.21px) is the floor that still
+  shows. Detail values (role-card's account line) and dialog labels are not identifiers and stay at 0.
+- **Users and Groups list limits.** The Users directory lists at most 50 roles per user, and the search
+  box also asks the server (debounced) so a role past that cut is still searchable; the client-side
+  match stands in while the answer is pending. A group's roles move through the delta endpoints (add /
+  remove), never the whole bundle, which may be thousands of rows; the add-by-dimension route writes 500
+  rows per call.

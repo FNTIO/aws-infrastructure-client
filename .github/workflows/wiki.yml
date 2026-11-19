@@ -1,6 +1,5 @@
-# Mirrors wiki/ into the GitHub wiki (a separate git repo GitHub hosts at
-# <repo>.wiki.git). The wiki must exist first: create its first page once in
-# the Wiki tab, otherwise the clone fails with "Repository not found".
+# Mirrors wiki/ into the GitHub wiki (its own git repo at <repo>.wiki.git). The wiki must exist first: create
+# its first page once in the Wiki tab, otherwise the clone fails with "Repository not found".
 # Pages edited in the wiki web UI are overwritten by the next sync.
 name: Wiki
 

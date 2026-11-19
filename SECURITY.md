@@ -30,11 +30,12 @@ has shipped to deployments.
 
 ## Scope
 
-In scope: anything in this repository, including cross-account trust
+In scope: the product as released (the package, the web app, the desktop
+client) and the source and workflows that build it, including cross-account trust
 (`TargetAccountStack`, sub-pinning), credential and console vending, the
 access model, sign-in (Cognito, passkeys, service users), the VPN control
 plane and its ACL and security-group automation, the desktop client's
-credential handling, and the deploy workflows.
+credential handling, and the release and deploy workflows.
 
 Out of scope: findings that require a compromised AWS account or admin user
 of the deployment itself, and issues in third-party dependencies that have no

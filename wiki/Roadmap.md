@@ -2,7 +2,7 @@ Where the product is going: the vision, the four epics and where each stands, an
 
 ## Vision
 
-Infra Client is a platform for handing out short-lived AWS credentials and connecting developers to private cloud resources. The foundation is the credential-vending API (Cognito → KMS-signed OIDC web identity → STS); everything else builds on it. FNTIO develops it for enterprise customers, and one deployment ("project") serves one customer project. A customer's platform team writes a small CDK app against the package to deploy the hub into their hub AWS account and the auditable trust and connector stacks into their workload accounts. The repo is headed for public, source-available release, with FNTIO's own deployment config moving to a private repo; end-user docs are to be baked into the web UI and developer docs published on a docs site.
+Infra Client is a platform for handing out short-lived AWS credentials and connecting developers to private cloud resources. The foundation is the credential-vending API (Cognito → KMS-signed OIDC web identity → STS); everything else builds on it. FNTIO develops it for enterprise customers, and one deployment ("project") serves one customer project. A customer's platform team writes a small CDK app against the package to deploy the hub into their hub AWS account and the auditable trust and connector stacks into their workload accounts. The product has a public home (the docs-only repository that holds the Releases, the wiki and the issue tracker; the source stays private for now, publishing it source-available is still open); end-user docs are to be baked into the web UI and developer docs published on a docs site.
 
 The distribution model settled with it:
 
@@ -11,7 +11,7 @@ The distribution model settled with it:
 | Stacks, constructs, API and issuer Lambdas, web frontend | One npm package, `@fntio/infra-client`, all in one version; Lambdas prebundled, frontend built in |
 | Web frontend styling | Per deployment, through configuration and the in-app theme wizard; never a fork, and no customer runs an Angular build |
 | Electron client | Built, signed and notarized once by FNTIO and publicly downloadable; adopts the connected deployment's styling at runtime (a per-client-installer detour was reversed) |
-| This repo | Public and source-available under the Elastic License v2: commercial use allowed, no resale |
+| This repo | The public home of the product (Releases, wiki, issues, consumer docs) under the Elastic License v2: commercial use allowed, no resale. The source is maintained privately; publishing it is still open |
 
 ## The four epics
 
@@ -19,7 +19,7 @@ The distribution model settled with it:
 | --- | --- | --- |
 | 1 | Credential Vending / User Management API | Shipped, largely done; hardening ideas remain |
 | 2 | Web Application for User Management / Credential Vending | Shipped and in progress: live on S3 + CloudFront, feature work continues |
-| 3 | Desktop App (Electron, multi-backend) | Shipped: v0.1 (2026-07-22); a signed macOS installer ships on every Release since 0.1.14 and updates itself from the Release feed since 0.4.0 (feed on the public repository since 0.5.0); Windows self-install waits on a signed installer, and the discovery-URL registry remains to harden |
+| 3 | Desktop App (Electron, multi-backend) | Shipped: v0.1 (2026-07-22); a signed macOS installer ships on every Release since 0.1.14 and updates itself from the Release feed since 0.4.0 (feed on the public repository since 0.5.0); the Windows installer is signed and self-updating since 0.8.0, and the discovery-URL registry remains to harden |
 | 4 | Private VPC Access (Tailscale-like) | Shipped: slices 1 to 5 verified (2026-07-27); per-site control planes deployed and verified (2026-08-13) |
 
 Each epic keeps a scope statement, an implementation log, a decision log and an ideas list with the product owner.
@@ -50,16 +50,16 @@ The sequencing in the source: finish hardening Epic 1 (the contract every client
 
 With all four epics shipped in some form, the nearest work is packaging, nearest first:
 
-1. Publish the package: the tarball is pack-ready; the remaining items (prepack freshness guard, snapshot suite, the import CLI, a StackSet template) are listed on [[Releasing]].
+1. Publish the package: done since 0.5.0 (npm, staged by the release and approved by hand); the remaining items (prepack freshness guard, snapshot suite, the import CLI, a StackSet template) are listed on [[Releasing]].
 2. Desktop release pipeline: done since 0.5.0 (signed, notarized and published once per release; GitHub Releases plus electron-updater). Left: a compat test for the `/.well-known/infra-client` contract.
-3. Going public: move `infra/` to a private repo, seed a fresh public repo from a cleaned snapshot, split `docs/` by audience.
+3. Going public: the docs-only public repository exists (Releases, wiki, issues); publishing the source (a cleaned snapshot with FNTIO's deployment kept private) and splitting `docs/` by audience remain.
 4. Documentation: a developer docs site seeded from the getting-started narrative and the package's TSDoc, and end-user docs inside the web UI.
 
 The packaging plan's own sequencing has the first three steps done (the portal seam, prebundled Lambdas with the baked frontend, the workspace split with samples). Open, in order:
 
-- Snapshot suite and npm publish pipeline (org, provenance, dist build).
-- Desktop sign/notarize/release pipeline, the `appId` decision (settled) and the compat test.
-- Public-repo preparation (private infra repo, cleaned snapshot, docs split) and the developer docs site.
+- Snapshot suite (the npm publish pipeline is live: staged through trusted publishing, approved by hand).
+- The `/.well-known/infra-client` compat test (the desktop sign/notarize/release pipeline is live; the `appId` decision is settled).
+- Publishing the source (cleaned snapshot, FNTIO's deployment kept private, docs split) and the developer docs site.
 - Catalog seeding and StackSet delivery.
 - End-user docs in the UI.
 

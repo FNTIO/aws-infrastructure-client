@@ -26,9 +26,35 @@ Detail: [Upgrade](https://github.com/FNTIO/aws-infrastructure-client/blob/main/p
 
 ## Version-specific upgrade notes
 
+### Upgrading past 0.8.0: origin failover and the 2025 TLS policy
+
+Deploy `CredsStack` and `WebStack` (the usual hub deploy). Both CloudFront distributions move to the `TLSv1.2_2025` viewer policy and gain an origin group over their bucket and a new same-region copy, which clears Security Hub CloudFront.15 and CloudFront.4. Nothing is replaced: the distributions, the buckets, the signing keys and the DNS records update in place, and the site bucket becomes versioned (old versions expire after 7 days).
+
+The issuer's copy is filled by the same deploy. The site's copy fills as objects are written: an upgrade ships a new web build, so the deploy rewrites the site files and they replicate within minutes, and `branding.json` follows the next time an admin saves the theme. To fill the copy at once:
+
+```bash
+copy=$(aws cloudformation describe-stack-resources --stack-name WebStack \
+  --query "StackResources[?ResourceType=='AWS::S3::Bucket' && starts_with(LogicalResourceId,'SiteFailoverBucket')].PhysicalResourceId" --output text)
+aws s3 sync "s3://<your site bucket>" "s3://$copy"
+```
+
+Then lift your CloudFront.4 suppression in Security Hub; both findings pass at the next evaluation. The issuer's copy also answers when the issuer bucket is emptied or loses its policy (its group fails over on 403 and 404 as well); the site's copy covers S3 errors and timeouts on the primary, since it mirrors deletes. Neither covers a regional S3 outage.
+
+### Upgrading to 0.8.0: signed Windows installer
+
+Nothing to migrate on the hub. Desktop: a Windows install of 0.7.0 or earlier is replaced by hand once with the signed 0.8.0 installer; from then on it updates itself like macOS (see [Releasing](Releasing)).
+
+### Upgrading to 0.7.0: private network
+
+Deploy the hub stacks as usual, then, if you run the private network, `NetworkStack` and every `Connector-<account>` stack by hand. Detail: the 0.7.0 entry in [[Release Notes]].
+
+### Upgrading to 0.6.0: service-user scopes, dashboard layout in config
+
+**Breaking for integrations:** `POST /admin/service-users` requires `scopes`, and every service user is route-gated from this version on (an existing one reads as `aws`, `network`, `shares`, `admin.write.all`; routes outside that table answer `403`). A dashboard layout an admin set in the UI moves into the `dashboard: { layout }` config block before the deploy. Detail: the 0.6.0 entry in [[Release Notes]].
+
 ### Upgrading to 0.5.0: non-root network containers, access logs, large catalogs
 
-Deploy the hub stacks as usual, then, if you run the private network, `NetworkStack` and **every** `Connector-<account>` stack: the control-server and connector task definitions change (every container non-root with its own tmpfs; the ALB gains an access-log bucket), so each control server restarts once and each connector re-registers once. Needs aws-cdk-lib 2.263 or later and Fargate platform version `LATEST`. The hub deploy adds `DataStack`'s `AccessLogsBucket`, which the web, issuer and plugin-asset buckets and both CloudFront distributions log into; suppress Security Hub's S3.9 finding on that one bucket (its own text says so). Everything else in 0.5.0 (paged lists, the dashboard sections, pickers, the access report) rides the hub deploy with nothing to migrate: `accountDimensions` is opt-in, and when you turn it on, `scripts/backfill-dimensions.mjs` fills tenant / project / stage on accounts registered before it (new registrations store them as they come in). Desktop: install the 0.5.0 DMG by hand once. A 0.4.0 app polls the retired feed repository and never sees this or any later release; from 0.5.0 on, macOS installs updates itself and Windows announces them (see [Releasing](Releasing)).
+Deploy the hub stacks as usual, then, if you run the private network, `NetworkStack` and **every** `Connector-<account>` stack: the control-server and connector task definitions change (every container non-root with its own tmpfs; the ALB gains an access-log bucket), so each control server restarts once and each connector re-registers once. Needs aws-cdk-lib 2.263 or later and Fargate platform version `LATEST`. The hub deploy adds `DataStack`'s `AccessLogsBucket`, which the web, issuer and plugin-asset buckets and both CloudFront distributions log into; suppress Security Hub's S3.9 finding on that one bucket (its own text says so). Everything else in 0.5.0 (paged lists, the dashboard sections, pickers, the access report) rides the hub deploy with nothing to migrate: `accountDimensions` is opt-in, and when you turn it on, `scripts/backfill-dimensions.mjs` fills tenant / project / stage on accounts registered before it (new registrations store them as they come in). Desktop: install the 0.5.0 DMG by hand once. A 0.4.0 app polls the retired feed repository and never sees this or any later release; from 0.5.0 on, macOS installs updates itself; Windows announces them up to 0.7.0 and installs them itself from the signed 0.8.0 on (see [Releasing](Releasing)).
 
 ### Upgrading to 0.4.0: HTTPS to Headscale, read-only containers
 

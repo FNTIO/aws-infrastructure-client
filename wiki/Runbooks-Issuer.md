@@ -147,19 +147,21 @@ Post-deploy checks:
 
 ### Republish by hand
 
-The three objects are written only by the deploy. A change to the
-publisher's code republishes them on its own (its bundle hash is a property
-of `Custom::OidcIssuerDocuments`); if the bucket was ever emptied by hand,
-invoke the publisher directly with a Create-shaped event — the bucket name
-and key ids are CredsStack resources:
+The three objects are written only by the deploy, to the issuer bucket and
+its failover copy together; never delete either bucket by hand, the publisher
+fails the deploy when one is missing. A change to the publisher's code
+republishes them on its own (its bundle hash is a property of
+`Custom::OidcIssuerDocuments`); if a bucket was ever emptied by hand, invoke
+the publisher directly with a Create-shaped event — both bucket names and the
+key ids are CredsStack resources:
 
 ```bash
 aws cloudformation describe-stack-resources --stack-name CredsStack \
-  --query "StackResources[?starts_with(LogicalResourceId,'IssuerBucket')||starts_with(LogicalResourceId,'IssuerSigningKey')].[LogicalResourceId,PhysicalResourceId]" --output table
+  --query "StackResources[?starts_with(LogicalResourceId,'IssuerBucket')||starts_with(LogicalResourceId,'IssuerFailoverBucket')||starts_with(LogicalResourceId,'IssuerSigningKey')].[LogicalResourceId,PhysicalResourceId]" --output table
 aws cloudformation describe-stack-resources --stack-name CredsStack \
   --query "StackResources[?ResourceType=='AWS::Lambda::Function'&&starts_with(LogicalResourceId,'IssuerPublisher')].PhysicalResourceId" --output text
 aws lambda invoke --function-name <that function> --cli-binary-format raw-in-base64-out \
-  --payload '{"RequestType":"Create","ResourceProperties":{"Bucket":"<bucket>","Issuer":"https://issuer.<zone>","KeyIds":["<key id>"]}}' /dev/stdout
+  --payload '{"RequestType":"Create","ResourceProperties":{"Bucket":"<bucket>","FailoverBucket":"<failover bucket>","Issuer":"https://issuer.<zone>","KeyIds":["<key id>"]}}' /dev/stdout
 ```
 
 CloudFront serves the new objects within 5 minutes.
@@ -175,4 +177,4 @@ Nothing in any target account changes either way.
 
 No API Gateway or Lambda charges any more; the distribution and bucket sit
 inside the free tiers at issuer traffic (STS fetches are cached for 5
-minutes). The WAF ACL is the existing one — no new ACL charge.
+minutes). With WAF on, the issuer gets its own observe-only web ACL `<prefix>-issuer` (about $8 per month).

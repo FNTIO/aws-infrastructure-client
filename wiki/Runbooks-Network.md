@@ -145,9 +145,9 @@ the site will never return.
 ## Headscale admin ops
 
 Connector hygiene is automatic: a redeployed connector enrolls as a new
-node, and the reconciler deletes its offline predecessor once a trusted
-replacement for the same account and VPC is online for 24h+ (logged as
-`prunedConnectors`). Until then the predecessor is listed as
+node, and the reconciler deletes a predecessor that has been offline for 24h+
+while a trusted replacement for the same account and VPC is online (logged
+as `prunedConnectors`). Until then the predecessor is listed as
 `supersededConnectors`, not as stale, so a routine task replacement (Fargate
 retirement, a redeploy) does not raise the `StaleConnectors` alarm. An
 account's ONLY connector is never deleted — it stays in the stale list and the
@@ -189,7 +189,7 @@ is. Every task start mints a key; only the newest is stored, and only when
 the secret is absent or the rotation stamp changed (`headscale apikeys list`
 / `expire` via ECS Exec if you want to prune old ones). The stack output
 `HeadscaleApiKey<site>` says `existing`, `created`, or `rotated`; the
-handler's log group is `/aws/lambda/NetworkStack-HeadscaleApiKeyFn*`.
+handler's log group is the CDK-named `NetworkStack-HeadscaleApiKeyFnLogs*`.
 
 The secret is resolved by CloudFormation at deploy time. To ROTATE the key,
 redeploy with `-c headscaleKeyRotation=$(date +%s)`: the stamp rolls the

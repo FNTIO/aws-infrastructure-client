@@ -10,7 +10,7 @@ at the source.
 ## What a pull request here can change
 
 - `wiki/`: the wiki's source. A workflow mirrors the folder into the GitHub
-  wiki on every push to `main` after checking that every link and heading
+  wiki on every push to `main` that touches it, after checking that every link and heading
   anchor resolves (`node .github/scripts/check-wiki-links.mjs`). Anything
   typed into the wiki web UI is overwritten by the next sync, so edit the
   files. Pages carry no deployment-specific values: no account ids, customer
@@ -20,8 +20,8 @@ at the source.
   `frontend/README.md`, this file.
 
 `packages/infra-client/CHANGELOG.md` and `openapi.yaml` are copies of what
-ships inside the package for the released version; they are updated by the
-release, not by hand.
+ships inside the package; they are written by the documentation export from
+the source repository, not by hand.
 
 Commit messages: `<area>: <what changed>` in the imperative, e.g.
 `wiki: document the alertEmail list`.
@@ -32,7 +32,7 @@ Open issues through the forms (bug, feature, deployment problem, design
 feedback). A security report never goes in an issue: use private
 vulnerability reporting as [SECURITY.md](SECURITY.md) describes. Questions
 and open-ended topics go to
-[Discussions](https://github.com/FNTIO/aws-infrastructure-client/discussions): Q&A for
+[Discussions](https://github.com/FNTIO/aws-infrastructure-client/discussions) (on the public repository): Q&A for
 how-do-I questions, Ideas for proposals that are not yet a feature request,
 Announcements for releases, Show and tell for what people built. Labels are
 declared in

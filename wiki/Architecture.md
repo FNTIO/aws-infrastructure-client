@@ -4,7 +4,7 @@
 
 | Deliverable | Repo path | Ships as |
 | --- | --- | --- |
-| The package `@fntio/infra-client` | `packages/infra-client/`, plus the `frontend/` build copied into `assets/web` at pack time | An npm tarball (a registry at general availability): compiled `dist/`, one prebundled folder per Lambda under `assets/`, the built web app, `openapi.yaml`, the package README |
+| The package `@fntio/infra-client` | `packages/infra-client/`, plus the `frontend/` build copied into `assets/web` at pack time | An npm package (`npm install @fntio/infra-client`; the same tarball is attached to each Release): compiled `dist/`, one prebundled folder per Lambda under `assets/`, the built web app, `openapi.yaml`, the package README |
 | The desktop client | `desktop/` | One public signed Electron binary for all deployments, attached to each GitHub Release by the `release` workflow (`desktop-build` cuts test builds). Not in the package |
 | FNTIO's own deployment | `infra/` | `config/project.ts`, `bin/app.ts`, the internal-only PipelineStack, TestbedStack and DemoVpcStack, the onboarding import CLI, the ops runbooks. Not in the package; moves to a private repo before the source-available release |
 
@@ -12,7 +12,7 @@ Also in the repo but not shipped: `samples/` (five consumer-voice CDK apps the p
 
 ## Stacks
 
-Nine CDK stacks. The hub account hosts the portal; each workload account gets a trust stack and, optionally, a VPN connector per VPC. The package exports the hub stacks, `TargetAccountStack` and `ConnectorStack`; `PipelineStack` and `TestbedStack` live in `infra/lib/` and are FNTIO-only.
+Nine CDK stacks make up the product and its deploy scaffolding (FNTIO's `bin/app.ts` also wires a `SecurityBaselineStack` per region and the optional `DemoVpcStack`; neither is in the package). The hub account hosts the portal; each workload account gets a trust stack and, optionally, a VPN connector per VPC. The package exports the hub stacks, `TargetAccountStack` and `ConnectorStack`; `PipelineStack` and `TestbedStack` live in `infra/lib/` and are FNTIO-only.
 
 | Stack | Deploys to | Holds |
 | --- | --- | --- |
@@ -26,7 +26,7 @@ Nine CDK stacks. The hub account hosts the portal; each workload account gets a 
 | `PipelineStack` | hub | The GitHub OIDC provider and deploy role CI uses. Deployed manually, once. FNTIO-only |
 | `TestbedStack` | hub | Temporary VPN acceptance test bed. FNTIO-only |
 
-In FNTIO's deployment, pushing `main` deploys `DataStack`, `CredsStack` and `WebStack` (with `WebCertStack` as a dependency); the network stacks, `PipelineStack` and the target-account stacks are hand deploys. Details: [Infra: nine CDK stacks](Architecture#infra--nine-cdk-stacks-binappts). Subsystems inside a stack are constructs in `lib/constructs/` (`OidcIssuer`, `VendingApi`, `AppFunction`, `AppTable`, `Monitoring`, `TailnetConnector`, `SgManager`, `TailnetResolver`, `WebAcl`, the web-identity helpers). A construct is a code unit, not a deployment unit, so the stack list above is complete.
+In FNTIO's deployment, pushing `main` deploys `DataStack`, `CredsStack` and `WebStack` (with `WebCertStack` as a dependency); the network stacks, `PipelineStack` and the target-account stacks are hand deploys. Details: [Infra: the CDK stacks](Architecture#infra--the-cdk-stacks-binappts). Subsystems inside a stack are constructs in `lib/constructs/` (`OidcIssuer`, `VendingApi`, `AppFunction`, `AppTable`, `Monitoring`, `TailnetConnector`, `SgManager`, `TailnetResolver`, `WebAcl`, plus the `mirroredImage`, `scratchTmpfs`, `addTargetAccountTrust` and web-identity helpers) and `lib/plugins/` (`PluginApi`, `PluginCatalogActivation`). A construct is a code unit, not a deployment unit, so the stack list above is complete.
 
 ## Credential vending
 
@@ -61,31 +61,32 @@ sequenceDiagram
 
 ## Data model
 
-Twelve DynamoDB tables in `DataStack`. Tables reference each other by id; nothing is duplicated.
+Eleven DynamoDB tables in `DataStack`. Tables reference each other by id; nothing is duplicated.
 
 | Table | Key | Holds |
 | --- | --- | --- |
 | Accounts | `accountNumber` | Registered AWS accounts (name, environment, admin-set profile name) |
 | Roles | `accountNumber` + `roleName` | The assumable roles; `roleArn` lives here, the single source of truth |
-| Access | `principal` + `target`, GSI `byTarget` | Access model v2: grants exactly as granted (`user#` or `group#` to `role#` or `resource#`), memberships (`member#`) and per-role preferences (`pref#`) |
+| Access | `principal` + `target`, GSI `byTarget`, TTL | Access model v2: grants exactly as granted (`user#` or `group#` to `role#` or `resource#`), memberships (`member#`) and per-role preferences (`pref#`) |
 | Requests | `requestId`, GSIs `byUser` and `byStatus` | Access requests awaiting or holding a decision; `byStatus` is the admin queue |
 | Audit | `eventId`, GSIs `byUser` (subject), `byActor` and `byDay`, TTL | Append-only activity log — every action that changes or uses access, one row each, plus per-user derived rows for group, cascade and bulk changes; never read for an access decision |
 | Groups | `groupId` | Group identity only; a group's bundle and members are Access rows |
-| Resources | `resourceId` | The private-network catalog: account, `cidr` + `ports`, display `dnsName`, connection instructions. Also holds the reconciler status sentinel |
+| Resources | `resourceId` | The private-network catalog: account, `cidr` + `ports`, display `dnsName`, connection instructions. Also holds the per-site reconciler status rows and the `__catalog-version__` row |
 | ServiceUsers | `clientId` | Registry of machine identities and their rotation state; never decides grants |
+| Tokens | `tokenId`, GSI `byOwner`, TTL | Personal access tokens: hash, owner, scopes, expiry; never a grant |
 | Revocations | `userId` + `noticeId`, TTL | Access-change notices for the bell — revocations and unasked-for grants; 30-day TTL |
 | PluginCatalog | `pluginId` | Deployment-written records of the installed plugins: revision, enabled flag, bound accounts, declared permissions, tombstoned or not; read by plugin discovery, the plugin authorizer and `pluginAccess.ts`, never user grants. Always present, feature on or off |
 
-Users live in Cognito, not a table. Absence of an Access row is default-deny. Column-level detail: [Data model: twelve tables](Access-Model#data-model--twelve-tables-in-datastack); the decision rules are in [[Access Model]].
+Users live in Cognito, not a table. Absence of an Access row is default-deny. Column-level detail: [Data model: eleven tables](Access-Model#data-model--eleven-tables-in-datastack); the decision rules are in [[Access Model]].
 
 ## API
 
-One Express app, reachable through the portal's CloudFront distribution under `/api/*` and directly on API Gateway. The contract is `packages/infra-client/openapi.yaml` (OpenAPI 3.1, ships in the package): 76 paths, 98 operations. A drift test walks the mounted routes and fails when a route is missing from the spec or documented but gone; request and response shapes are maintained by hand. The Postman collection is generated from the spec.
+One Express app, reachable through the portal's CloudFront distribution under `/api/*` and directly on API Gateway. The contract is `packages/infra-client/openapi.yaml` (OpenAPI 3.1, ships in the package): 97 paths, 123 operations. A drift test walks the mounted routes and fails when a route is missing from the spec or documented but gone; request and response shapes are maintained by hand. The Postman collection is generated from the spec.
 
-- Authentication: every route except `GET /health` and `GET /.well-known/infra-client` takes `Authorization: Bearer <token>`, either a Cognito ID token (humans; admin routes need the `admins` group claim) or a `client_credentials` access token with the `api/invoke` scope (service users, who are all app admins).
-- User routes (36 operations): Health; Access (what I may assume, vend, console URL, expiry notices); Requests (raise and list my own, acknowledge decisions); Preferences (profile name, role label, auto-vend star, network, notifications); Network (sites, device key, dev shares and their directory); Resources (what I can reach); Notifications (access changes); Plugins (which plugin pages I may open).
-- Admin routes (62 operations): setup and branding; accounts and roles, and their display order; grants, including bulk; users (directory, invites and sign-up links, cascades, MFA reset); service users (create, rotate, retire); groups and members; the request queue (approve, deny); the resource catalog and resource grants; network topology, dev shares and sync; plugins (catalog, per-plugin grants); the activity log and the access report.
-- Conventions: JSON errors `{ "message" }`, ISO-8601 UTC timestamps, no server-side paging (lists are returned whole and windowed client-side), duration presets from 1 hour to 30 days for temporary access.
+- Authentication: every route except `GET /health` and `GET /.well-known/infra-client` takes `Authorization: Bearer <token>`: a Cognito ID token (humans; admin routes need the `admins` group claim), a personal access token (scoped to a route table), or a `client_credentials` access token with the `api/invoke` scope (service users; an admin only with `admin.write.all`, or `admin.read.all` for reads).
+- User routes (49 operations): Health; Access (what I may assume, vend, console URL, expiry notices); Requests (raise and list my own, acknowledge decisions); Preferences (profile name, role label, auto-vend star, network, notifications); Network (sites, device key, dev shares and their directory); Resources (what I can reach); Notifications (access changes); Plugins (which plugin pages I may open, plugin expiry notices); Tokens (my personal access tokens).
+- Admin routes (74 operations): setup and branding; accounts and roles, and their display order; grants, including bulk; users (directory, invites and sign-up links, cascades, MFA reset); service users (create, rotate, retire); groups and members; the request queue (approve, deny); the resource catalog and resource grants; network topology, dev shares and sync; plugins (catalog, per-plugin grants); the activity log and the access report.
+- Conventions: JSON errors `{ "message" }`, ISO-8601 UTC timestamps, one list contract for catalog-sized reads (`?q=&filter[key]=a,b&sort=&limit=&cursor=` answering `{items,nextCursor,total,facets}`; without `limit` a route still answers its whole-list shape; small lists are windowed client-side), duration presets from 1 hour to 30 days for temporary access.
 
 Route contract: [openapi.yaml](https://github.com/FNTIO/aws-infrastructure-client/blob/main/packages/infra-client/openapi.yaml), drift-tested against the mounted routes. Consumer view: [HTTP API](https://github.com/FNTIO/aws-infrastructure-client/blob/main/packages/infra-client/README.md#http-api).
 
@@ -111,9 +112,9 @@ per endpoint. New route = add `routes/<x>.ts` + `services/<x>Service.ts`.
 - `api/app.ts` — Express setup, request logging, `/health`, mounts routers, clean
   JSON 404/error handlers. Exports `handler = serverless(app)` **and** runs
   `app.listen(3000)` under `require.main === module` for local dev.
-- `api/auth.ts` — `requireAuth` (verify Cognito ID token, set `req.userId` +
-  `req.groups`) and `requireAdmin`.
-- `api/routes/` — `accounts`, `credentials`, `requests`, `preferences`, `network`, `resources`, `notifications`, `plugins`, `admin`.
+- `api/auth.ts` — `requireAuth` (verify the bearer token — Cognito ID token, personal access token or service-user token — set `req.userId` +
+  `req.groups`, enforce the token's route table) and `requireAdmin`.
+- `api/routes/` — `accounts`, `credentials`, `requests`, `preferences`, `network`, `resources`, `notifications`, `plugins`, `tokens`, `admin`.
 - `api/services/` — `accountsService` (user-scoped reads), `credentialsService`
   (vend), `adminService` (account/role catalog reads + writes), `grantsService`
   (assign/revoke/list grants), `usersService` (directory list + Cognito user
@@ -129,7 +130,7 @@ per endpoint. New route = add `routes/<x>.ts` + `services/<x>Service.ts`.
   topology, sync), `preferencesService`, `revocationsService` (the bell's
   notices), `serviceUsersService`, `accessReportService`, and the plugin side
   (`pluginCatalog`, `pluginAccess`, `pluginGrantsService`,
-  `pluginDiscoveryService`); token checks in `tokenVerifier` (shared with the
+  `pluginDiscoveryService`); `tokensService` + `personalTokens` + `tokenScopes` (personal access tokens and the route tables); `listing` + `catalogIndex` (the one list contract over the in-memory catalog index); `brandingService`, `setupService`, `reportJobs`, `profileNames`, `serviceUserRegistry`, `dimensions`; token checks in `tokenVerifier` (shared with the
   plugin authorizer); shared error types in `httpErrors`.
 - `api/__tests__/` — Jest, one suite per source file (mocked AWS + supertest).
 - `reapproval/handler.ts` — the scheduled (daily) Lambda entry point that calls
@@ -155,9 +156,9 @@ per endpoint. New route = add `routes/<x>.ts` + `services/<x>Service.ts`.
   Errors metric emails the ops topic. No output on success — errors are the
   signal.
 
-## Infra — nine CDK stacks (`bin/app.ts`)
+## Infra — the CDK stacks (`bin/app.ts`)
 
-- **`DataStack`** ([lib/data-stack.ts](https://unpkg.com/browse/@fntio/infra-client@latest/dist/lib/data-stack.js)) — the twelve tables above.
+- **`DataStack`** ([lib/data-stack.ts](https://unpkg.com/browse/@fntio/infra-client@latest/dist/lib/data-stack.js)) — the eleven tables above.
 - **`CredsStack`** ([lib/creds-stack.ts](https://unpkg.com/browse/@fntio/infra-client@latest/dist/lib/creds-stack.js)) — account A: Cognito
   (+ `admins` group), an **`OidcIssuer`** construct (KMS RSA signing key(s) +
   the discovery document and JWKS as static S3 objects behind a CloudFront
@@ -167,9 +168,11 @@ per endpoint. New route = add `routes/<x>.ts` + `services/<x>Service.ts`.
   in `creds-stack.ts`)), a **`VendingApi`** construct (the Express Lambda — Node 22;
   **read/write** on every table above (read-only on PluginCatalog),
   `kms:Sign`, Cognito user
-  admin (`ListUsers`/`ListUsersInGroup` + `AdminCreateUser`/
-  `AdminUpdateUserAttributes`/`AdminDeleteUser`/`AdminAddUserToGroup`/
-  `AdminRemoveUserFromGroup`) **scoped to this pool's ARN** (the admin Users
+  admin (`ListUsers`/`ListUsersInGroup`, `AdminGetUser`, `AdminCreateUser`,
+  `AdminSetUserPassword`, `AdminUpdateUserAttributes`, `AdminDeleteUser`,
+  `AdminUserGlobalSignOut`, `AdminAddUserToGroup`/`AdminRemoveUserFromGroup`,
+  the provider-link actions and `Create`/`Delete`/`DescribeUserPoolClient` for
+  service users) **scoped to this pool's ARN** (the admin Users
   page), **no** `sts:AssumeRole`), and a `LambdaRestApi` proxy that also serves a
   public, unauthenticated `GET /.well-known/infra-client` discovery doc (project
   name + Cognito ids + issuer) the desktop app reads to self-configure. Receives the tables from `DataStack` via props. The pool is on the **Essentials** feature
@@ -179,8 +182,9 @@ per endpoint. New route = add `routes/<x>.ts` + `services/<x>Service.ts`.
   changes.
   CredsStack also provisions a **`ReapprovalSweeper`** Lambda on a **daily
   EventBridge schedule** — it raises a reapproval request into the admin queue for
-  standing (long-term, direct) grants past their 12-month mark and auto-revokes any
-  left un-reapproved past the grace window.
+  standing grants (a user's direct rows and a group's bundle, one review per group) past
+  their 12-month mark and auto-revokes any left un-reapproved past the grace window, and
+  raises the yearly reviews of admins and service users (see [[Access Model]]).
   Hardening 2026-07-27: vend API stage throttle (`apiThrottle`, 25 rps / 50 burst
   then, 100 / 200 by default since the per-token WAF rule took over the leaked-token job); every Lambda
   gets 3-month log retention via the shared `AppFunction` construct.
@@ -224,11 +228,17 @@ per endpoint. New route = add `routes/<x>.ts` + `services/<x>Service.ts`.
 - **`ConnectorStack`** ([lib/connector-stack.ts](https://unpkg.com/browse/@fntio/infra-client@latest/dist/lib/connector-stack.js)) — one
   per target VPC; deployed manually. Also carries that account's SG-manager
   Lambda (see "Per-resource firewall automation").
+- **`SecurityBaselineStack`** (`infra/lib/security-baseline-stack.ts`, FNTIO-only) — one per
+  region (`SecurityBaseline-<region>`): Security Hub, the account-level
+  baseline findings fix. Deployed manually.
+- **`DemoVpcStack`** (`infra/lib/demo-vpc-stack.ts`, FNTIO-only) — a demo VPC in a workload
+  account, wired only when `CDK_DEMO_VPC_ACCOUNT` is set.
 
 Subsystems inside a stack live as **constructs** in
 [lib/constructs/](https://unpkg.com/browse/@fntio/infra-client@latest/dist/lib/constructs/) — `OidcIssuer`, `VendingApi`,
-the `web-identity.ts` helpers, plus `AppFunction`, `AppTable`, `Monitoring`,
-`WebAcl`, `TailnetConnector`, `SgManager` and `TailnetResolver` (FNTIO's
+the `web-identity.ts`, `mirroredImage`, `scratchTmpfs` and `addTargetAccountTrust` helpers,
+plus `AppFunction`, `AppTable`, `Monitoring`, `WebAcl`, `TailnetConnector`,
+`SgManager` and `TailnetResolver`, and the plugin constructs in `lib/plugins/` (FNTIO's
 `GithubDeployRole` lives in `infra/lib/constructs/`, outside the package). A construct is a code-organization unit, not a deployment
 unit: everything in it still deploys as part of its stack, so the stack list
 above is complete. The Cognito user pool and the `LambdaRestApi` deliberately

@@ -30,4 +30,4 @@
 
 ## How this wiki is maintained
 
-The pages are files in the repo's [wiki/](https://github.com/FNTIO/aws-infrastructure-client/tree/main/wiki) folder. A workflow mirrors that folder into the GitHub wiki on every push to `main`, after checking that every link and heading anchor resolves. Edit the files in the repo (a commit or a PR); anything typed into the wiki web UI is overwritten by the next sync. Pages carry no deployment-specific values (account ids, customer names, internal hostnames) because the wiki becomes public with the repo.
+The pages are files in the repo's [wiki/](https://github.com/FNTIO/aws-infrastructure-client/tree/main/wiki) folder. A workflow mirrors that folder into the GitHub wiki on every push to `main` that touches it, after checking that every link and heading anchor resolves. Edit the files in the repo (a commit or a PR); anything typed into the wiki web UI is overwritten by the next sync. Pages carry no deployment-specific values (account ids, customer names, internal hostnames) because the wiki is public.

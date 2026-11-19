@@ -248,6 +248,11 @@ export const PROJECT: ProjectConfig = {
   // load is 10–15 calls — size for everyone opening the portal at once.
   apiThrottle: { rateLimit: 100, burstLimit: 200 },
 
+  // Optional. Set false only when another stack of yours owns the account-wide
+  // API Gateway CloudWatch Logs role (AWS::ApiGateway::Account). The default
+  // ships it with CredsStack so the stage's logging deploys everywhere.
+  apiCloudWatchRole: true,
+
   // Optional. How every user's dashboard is laid out: "auto" (default) gives a
   // user the Main / Favorites / Recent sections once they hold an account an
   // admin took off the Main section; "sections" or "plain" for everyone.
@@ -585,7 +590,7 @@ config table).
 Deployments pass the AWS Foundational Security Best Practices controls that
 apply to their resources by construction, or with `prod: true`. A few are
 deliberate cost trade-offs or by-design exceptions (CloudFront distributions
-without origin failover or signed-URL key groups) that you suppress once per
+without signed-URL key groups) that you suppress once per
 account. The source repository's runbook lists every control and its status
 under "Security posture" in the deployment README.
 
@@ -907,8 +912,8 @@ of this product's frontend, not an arbitrary site.
 
 `openapi.yaml` in the package root describes every route of the portal API
 (OpenAPI 3.1): the token kinds (a Cognito ID token for people, a
-`client_credentials` access token for service users, who are admins, and
-personal access tokens),
+`client_credentials` access token for service users, who are admins within
+their scopes, and personal access tokens),
 request and response shapes, and status codes. The route inventory is
 drift-tested against the mounted routes in the package's test suite; the
 shapes are maintained by hand alongside the code. Requests go to

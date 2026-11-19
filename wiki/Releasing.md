@@ -18,7 +18,7 @@ The bite risk is hub versus target-account skew. The issuer host is baked into e
 
 ## How a release is cut
 
-A release is a version tag in the private source repository. Its `release` workflow runs five jobs:
+A release is a version tag in the private source repository. Its `release` workflow runs six jobs:
 
 - `check`: the tag equals `v<package version>`, the desktop version matches, the changelog entry exists.
 - `pack`: every workspace's test suite (including the cdk-nag gate, which synthesizes every hub stack and a target-account stack and fails on any unsuppressed finding), the typecheck sweep, the frontend's tests and build, then `npm pack` for the core and the plugin packages. Every tarball is then scanned: nothing deployment-specific (account ids, hostnames, addresses, customer names) and no link into a private path may ship.

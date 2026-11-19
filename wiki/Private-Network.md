@@ -17,7 +17,7 @@ Source: [Sites](Private-Network#sites--per-site-control-planes).
 | `NetworkStack` | hub account | The shared VPC, cluster, ALB and EFS; per-site Headscale services, minters and API-key secrets; the ACL reconciler; a Lambda interface endpoint so the reconciler can call SG-managers from a VPC with no internet |
 | `ConnectorStack` | the VPC's account, one per VPC | `TailnetConnector` (a Fargate task that mints a key at boot, joins its site as `connector-<account>`, or `connector-<account>-<name>` for an account's named second VPC, and advertises its routes), that VPC's `SgManager` (it converges only its own VPC's groups and answers `other-vpc` for the rest), and a `TailnetResolver` per site |
 | `TestbedStack` | hub account, FNTIO-only | A temporary acceptance test bed (nginx and Aurora) with its own SG-manager and resolver |
-| Key minter (`keyminter.ts`) | the NetworkStack VPC | The only code that talks to Headscale's admin API, over Cloud Map. `deviceHandler` mints a single-use 30-minute key under `u-<sub>` for a given site and is invocable only by the vending API role. `connectorHandler` (one per site) mints a 5-minute machine key under the `infra` user and ignores its event, so a connector account chooses nothing; which site it joins is decided by which minter it may invoke |
+| Key minter (`keyminter.ts`) | the NetworkStack VPC | Talks to Headscale's admin API over Cloud Map (the reconciler is the only other caller). `deviceHandler` mints a single-use 30-minute key under `u-<sub>` for a given site and is invocable only by the vending API role. `connectorHandler` (one per site) mints a 5-minute machine key under the `infra` user and ignores its event, so a connector account chooses nothing; which site it joins is decided by which minter it may invoke |
 | ACL reconciler (`acl-reconciler.ts`) | the NetworkStack VPC, every 5 minutes, on `POST /admin/network/sync` and when the device minter creates a user's Headscale user (first enrollment in a site) | Renders effective resource access into one Headscale policy per site; auto-approves private routes of `infra`-owned connectors; detects stale connectors; expires user devices offline 7+ days; prunes replaced connectors; writes the `__reconciler-status__` sentinel with topology |
 | SG-manager (`sg-manager.ts`) | each connector account | Converges a resource's security group to "allow tcp on the registered ports from the connector SG"; only touches rules carrying the managed marker; its mutating IAM is pinned to the connector's VPC |
 | tailnet-resolver (`resolver.ts`) | each connector VPC, named per site | Names in, IPv4 addresses out; the only path that sees another account's private hosted zones |
@@ -38,7 +38,7 @@ flowchart LR
     D["device enrolled with a key from POST /network/device-key"] --> P
 ```
 
-The rule: a user may reach a resource's `cidr:ports` if and only if they hold it effectively (an own unexpired row or a group bundle) and the resource's CIDR sits inside an admin-approved route of its account's `connector-<account>` node. Everything else is denied by omission. Only admin-approved routes count, never a node's self-advertised ones, so an authenticated user cannot enroll a laptop named like a connector and inject CIDRs. Resources store a CIDR (floor `/24`; a bare IP becomes `/32`) rather than a name because Headscale destinations cannot be DNS names and Aurora failover moves IPs; `dnsName` is re-resolved each pass (a hub-account resource: Cloud Map, then public DNS; any other account's resource: that account's in-VPC resolver, with public DNS as a fallback only for a label the hub's Cloud Map does not own) and the resolved addresses become the rule's destination, so a registered `/32` self-heals. Skipped resources are logged as `no-connector` or `outside-approved-routes`, the first stop for "why can't I reach it?". The policy is PUT whole: a rejected PUT leaves the entire previous policy live, which the `ReconcilerErrors` alarm guards. Revocation lags at most five minutes, plus live WireGuard sessions until rekey.
+The rule: a user may reach a resource's `cidr:ports` if and only if they hold it effectively (an own unexpired row or a group bundle) and the resource's CIDR sits inside an admin-approved route of its account's `connector-<account>` node. Everything else is denied by omission. Only admin-approved routes count, never a node's self-advertised ones, so an authenticated user cannot enroll a laptop named like a connector and inject CIDRs. Resources store a CIDR (`/16` to `/32`; a bare IP becomes `/32`) rather than a name because Headscale destinations cannot be DNS names and Aurora failover moves IPs; `dnsName` is re-resolved each pass (a hub-account resource: Cloud Map, then public DNS; any other account's resource: that account's in-VPC resolver, with public DNS as a fallback only for a label the hub's Cloud Map does not own) and the resolved addresses become the rule's destination, so a registered `/32` self-heals. Skipped resources are logged as `no-connector` or `outside-approved-routes`, the first stop for "why can't I reach it?". The policy is PUT whole: a rejected PUT leaves the entire previous policy live, which the `ReconcilerErrors` alarm guards. Revocation lags at most five minutes, plus live WireGuard sessions until rekey.
 
 Reachability is two-keyed: the tailnet route gets a device into the VPC, and each resource's security group must also allow the connector's SG. With `securityGroupId` set on the resource, the SG-manager writes that rule; without it, the rule is a manual step. The reconciler holds no security-group authority itself and may only ask each account's manager, whose resource policy trusts the fixed reconciler role, so `NetworkStack` deploys before any `ConnectorStack`.
 
@@ -62,7 +62,7 @@ Every machine joined to a site with a user's account is a device of theirs: the 
 
 ## The desktop side
 
-`desktop/tailnet.js` drives the locally installed Tailscale CLI; the user installs Tailscale themselves and a guided setup walks them through it on first use. The page obtains a device key from `POST /network/device-key` and passes only the key and a site id over IPC; the control-plane URLs are pinned by the main process from backend discovery and must be `https://`, so a spoofed page cannot redirect the VPN and an unknown site id is refused. Connect is `tailscale login --login-server <site control> --auth-key <key>` followed by `tailscale set --accept-routes`. Each site gets its own Tailscale profile; switching sites tries `tailscale switch` first with a fresh login as fallback, and the active site is derived from the profile's tailnet name. Teardown is scoped: an in-page Disconnect or a backend logout logs out only that backend's profiles, while the tray's Disconnect and Quit are machine-level. CLI failures are classified into stable codes (`not-installed`, `daemon-not-running`, `key-rejected`, `timeout`, `cli-error`). On macOS the Tailscale binary only acts as a CLI when `SHLVL` is set, so the app sets it on every spawn. Detail: [Private network access](https://github.com/FNTIO/aws-infrastructure-client/blob/main/desktop/README.md#private-network-access-epic-4) and [The CLI needs SHLVL](https://github.com/FNTIO/aws-infrastructure-client/blob/main/desktop/README.md#the-cli-needs-shlvl-macos).
+`desktop/tailnet.js` drives the locally installed Tailscale CLI; the user installs Tailscale themselves and a guided setup walks them through it on first use. The page first asks the shell to switch to the site's saved profile (an empty key); only when the shell answers `needs-key` does it obtain a device key from `POST /network/device-key` and pass only the key and a site id over IPC; the control-plane URLs are pinned by the main process from backend discovery and must be `https://`, so a spoofed page cannot redirect the VPN and an unknown site id is refused. Connect is `tailscale login --login-server <site control> --auth-key <key>` followed by `tailscale set --accept-routes`. Each site gets its own Tailscale profile; switching sites tries `tailscale switch` first with a fresh login as fallback, and the active site is derived from the profile's tailnet name (the site's control-plane host; the MagicDNS suffix is only a fallback for enrollments made before sites existed). Teardown is scoped: an in-page Disconnect or a backend logout logs out only that backend's profiles, while the tray's Disconnect and Quit are machine-level. CLI failures are classified into stable codes (`not-installed`, `daemon-not-running`, `key-rejected`, `timeout`, `cli-error`). On macOS the Tailscale binary only acts as a CLI when `SHLVL` is set, so the app sets it on every spawn. Detail: [Private network access](https://github.com/FNTIO/aws-infrastructure-client/blob/main/desktop/README.md#private-network-access-epic-4) and [The CLI needs SHLVL](https://github.com/FNTIO/aws-infrastructure-client/blob/main/desktop/README.md#the-cli-needs-shlvl-macos).
 
 ## Deploys are manual
 
@@ -102,8 +102,9 @@ band is the security boundary keeping Headscale's admin API off the
 internet), a connector key minter, and an admin API key secret
 (`<resourcePrefix>/headscale-apikey-<site>`, minted by the deploy itself —
 see "Headscale admin ops"). Each site's Headscale sets
-`base_domain: <site>.tail.internal` — the desktop shell derives "which site
-am I on" from that, with no local bookkeeping to drift.
+`base_domain: <site>.tail.internal`; the desktop shell matches a profile to a
+site by its control-plane host and falls back to that suffix only for
+enrollments made before sites existed.
 
 **Resource prefix:** every by-name contract — the key
 minters, `-sg-manager`, the reconciler role, the API-key secret names, and
@@ -115,7 +116,7 @@ redeploy in lockstep. Max 15 chars (Lambda name budget), synth-validated.
 
 ## Tailnet key minting (`lambdacode/network/keyminter.ts`)
 
-The ONLY code path that talks to Headscale's admin API. It runs inside the
+Talks to Headscale's admin API (the reconciler, which puts the policy, approves routes and expires and deletes nodes, is the only other caller). It runs inside the
 NetworkStack VPC and reaches each site's Headscale over private Cloud Map DNS
 (`https://headscale-<site>.tailnet.internal:8080`, verified against the
 certificate the site's task publishes to SSM `/<resourcePrefix>/headscale-tls-<site>`
@@ -456,8 +457,9 @@ only while deploying, where a failure is a visible, retryable rollback.
   after upgrading.
   (2) The device minter + reconciler hold ALL sites' Headscale admin keys in
   one env var — same trust boundary as before (account-A IAM), broader blast
-  radius per function. (3) With >5 sites, revisit the reconciler timeout vs
-  its 5-minute schedule (overlapping passes).
+  radius per function. (3) The reconciler runs with reserved concurrency 1 (passes never
+  overlap) and a timeout of 90 s per site, capped at 15 minutes; with many
+  sites a pass can outlast the 5-minute schedule and the next tick queues behind it.
 
 - **Reconciler freshness:** grants render into Headscale ACLs every 5 minutes,
   so revocation lags ≤5 min (plus live WireGuard sessions until rekey) — same
